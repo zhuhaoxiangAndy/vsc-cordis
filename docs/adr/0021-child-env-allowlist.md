@@ -23,10 +23,12 @@ Extension Host 的 env 可能包含 token、代理凭据、`SSH_AUTH_SOCK`、CI 
 
 1. 默认 `vscordis.isolation.inheritEnv = false`。`IsolatedPluginLoader` 用
    `buildIsolatedChildEnv(false)` 生成固定白名单：进程启动/路径解析（`PATH`、`PATHEXT`、`COMSPEC`、
-   `SystemRoot`、`windir`、`SYSTEMDRIVE`）、临时目录、处理器/OS 信息、区域设置、用户主目录与常见
-   应用目录；并且**始终**设置 `ELECTRON_RUN_AS_NODE=1`（否则 Electron 下 fork 会启动完整应用）。
+   `SystemRoot`、`windir`、`SYSTEMDRIVE`；Linux/macOS 的 `LD_LIBRARY_PATH` / `DYLD_*` /
+   `XDG_RUNTIME_DIR`，Electron 包装器启动可能需要，非凭据）、临时目录、处理器/OS 信息、区域设置、
+   用户主目录与常见应用目录；并且**始终**设置 `ELECTRON_RUN_AS_NODE=1`（否则 Electron 下 fork
+   会启动完整应用）。
 2. 显式打开 `vscordis.isolation.inheritEnv = true` 时才完整继承；此时每个 untrusted 插件加载都会
-   写一条明确的降级日志，不允许静默。
+   写一条明确的 **warn 级**降级日志（经 `onWarning`），不允许静默。
 3. 白名单不是权限模型，也不改变 fs/子进程边界；它是“减少默认暴露面”，不是“环境隔离”。真正对抗性
    场景仍应使用专用 OS 账户/容器。
 4. 保留逃生开关的原因：插件可能依赖代理或自定义 env；开启即表示接受泄漏风险。

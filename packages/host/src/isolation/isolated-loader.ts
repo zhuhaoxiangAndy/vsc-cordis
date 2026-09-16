@@ -422,6 +422,15 @@ export class IsolatedPluginLoader {
           '请重新调用 ctx.async.useService(name) 取用当前提供者（ADR-0019）。',
       )
     }
+    // 注册表是权威：同进程提供者 last-wins 接管后，路由表可能尚未被级联清掉
+    // （旧会话还活着）。旧代理必须响亮失败，不能继续打到被替换的提供者。
+    const current = this.#options.registry.providerInfo(name)
+    if (current === undefined || current.owner !== entry.providerId) {
+      throw new Error(
+        `远程服务 "${name}" 的提供者已被替换（当前：${current?.owner ?? '<无>'}），这个代理已过期：` +
+          '请重新调用 ctx.async.useService(name) 取用当前提供者（ADR-0019）。',
+      )
+    }
     const session = this.#sessions.get(entry.providerId)
     if (session === undefined) {
       throw new Error(`远程服务 "${name}" 的提供者插件 "${entry.providerId}" 当前不在运行中`)
@@ -1188,7 +1197,10 @@ class IsolatedSession {
     this.#failAll(error.message)
     // 激活后协议违规同样要让宿主记录从 active 变 failed：kill() 会把 #closed 置位，
     // 子进程退出事件因此不会走 "unexpected" 分支（否则会留下"进程已死但状态 active"）。
-    if (this.#everActivated) this.#options.onUnexpectedExit?.(this.#pluginId, error)
+    // 但宿主主动卸载/重载（#closed=true）期间的迟到消息不能去标新 incarnation。
+    if (this.#everActivated && !this.#closed) {
+      this.#options.onUnexpectedExit?.(this.#pluginId, error)
+    }
     this.kill()
   }
 

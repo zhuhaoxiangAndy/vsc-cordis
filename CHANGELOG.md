@@ -43,7 +43,8 @@
 - **隔离子进程默认不再继承宿主的完整 env**：原先 `{ ...process.env }` 会把 token、代理凭据、
   `SSH_AUTH_SOCK` 等暴露给 `untrusted` 插件；现在默认只传系统启动白名单，新增
   `vscordis.isolation.inheritEnv`（默认 `false`）作为逃生开关，开启时每个插件加载都会写降级日志。
-  见 ADR-0021。
+  白名单包含 Linux/macOS 的 `LD_LIBRARY_PATH` / `DYLD_*` / `XDG_RUNTIME_DIR`（Electron 包装器
+  启动可能需要，非凭据）。见 ADR-0021。
 - **隔离边界可被插件根内的 junction/symlink 绕过**：Node `--permission --allow-fs-read=<pluginRoot>`
   只限制路径字符串、不解析链接；实测 root 内 junction 可读到 root 外文件。现在 fork 前递归扫描
   插件目录，任何链接的 `realpath` 落在 root 外都 fail-closed（`PluginReparsePointError` →
@@ -69,7 +70,7 @@
   进宿主事件循环（Extension Host DoS）。现在消息入口做结构校验、`#handle` 包 try/catch，
   畸形消息只失败该会话；启动/激活阶段也会快速 reject，不再干等 readyTimeout。
   激活后的协议违规同样走 `onUnexpectedExit` 把 `PluginHost` 记录转 `failed`，不会留下
-  “进程已死但状态 active”。
+  “进程已死但状态 active”；宿主主动卸载/重载窗口内的迟到消息（`closed=true`）不会误标新 incarnation。
 - **畸形 IPC 对象的 `toString` 仍可打崩宿主**：`process.send({ kind: 1, toString: 'not-a-function' })`
   会让监听器里的 `describe(message)`/`String()` 抛 `TypeError`（在 try/catch 之外）。现在整个
   message 监听器包 try/catch，并用只读 `typeof/kind` 的“永不抛”摘要替代 `String(value)`；
@@ -93,6 +94,8 @@
   现在宿主侧无权限不预取、子进程侧同步拒绝。
 - **last-wins 的被替换者卸载会删掉接管者的远程路由**：路由清理现在校验代际 token，
   只删除仍属于本次 `provide` 的条目；新增真实 IPC 回归。
+- **注册表/路由表可能短暂分裂**：`#invokeRemote` 除代际 token 外还回查注册表当前 owner，
+  同进程提供者 last-wins 接管后旧代理立即响亮失败，不会继续打到被替换者。
 - **ServiceRegistry 旧 handle 撤销新提供者、hard 依赖边被 soft 覆盖、last-wins 后旧 owner
   `provides` 残留**：handle 绑定 generation、hard 不降级、换人时清理旧 owner 集合。
   `depend` 进一步改为**按 kind 引用计数**：提前 dispose 一个 edge 不再误删另一条

@@ -18,6 +18,11 @@ const SAFE_ENV_KEYS = [
   'SystemRoot',
   'windir',
   'SYSTEMDRIVE',
+  // Linux/macOS 上 Electron 包装器可能依赖的运行时库路径（不是凭据；缺失会导致子进程起不来）
+  'LD_LIBRARY_PATH',
+  'DYLD_LIBRARY_PATH',
+  'DYLD_FALLBACK_LIBRARY_PATH',
+  'XDG_RUNTIME_DIR',
   // 临时目录
   'TEMP',
   'TMP',
