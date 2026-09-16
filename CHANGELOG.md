@@ -126,8 +126,9 @@
 ### 测试
 
 - `tsconfig.check.json` 明确排除 `packages/*/test/scratch/**`：一次性审计探针不该让主门禁变红。
-- 新增 H1/H2/F1/M1/F2 回归：`toString` 畸形 IPC 不打崩宿主、命令 ID 跨插件归属、
-  pnpm workspace 依赖链接放行/无同名 package 拒绝、`..evil` 不误判、坏 `onError` 不卡回收。
+- 新增 H1/H2/F1/M1/M2/F2 回归：`toString` 畸形 IPC 不打崩宿主、命令 ID 跨插件归属、
+  pnpm workspace 依赖链接放行/无同名 package 拒绝、`..evil` 不误判、跨 trust 接管写 `onWarning`、
+  坏 `onError` 不卡回收。
 - CI 在 Node 24 上显式运行 `pnpm run test:soak:strict`（`--expose-gc` 1000 轮严格浸泡），
   避免严格证据在默认 `pnpm test` 里永远 skip；本地实测堆增长 -0.21 MB。
 - 修复 `disposeBudgetMs` 用例在 CI 上的墙钟 flake：不再断言“恰好 2 项被跳过”（慢项超时后若还剩

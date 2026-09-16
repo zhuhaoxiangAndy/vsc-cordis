@@ -350,8 +350,12 @@ after(async () => {
 
 async function makeHost(
   hostApi: FakeHostApi,
-  overrides: { readonly disposeBudgetMs?: number; readonly inheritEnv?: boolean } = {},
-): Promise<{ host: PluginHost; loader: IsolatedPluginLoader }> {
+  overrides: {
+    readonly disposeBudgetMs?: number
+    readonly inheritEnv?: boolean
+    readonly onWarning?: (message: string) => void
+  } = {},
+): Promise<{ host: PluginHost; loader: IsolatedPluginLoader; registry: ServiceRegistry }> {
   const workerPath = await ensureWorker()
   // 注册表必须由测试显式创建并与 PluginHost **共用**：隔离加载器要往同一张表里
   // 注册远程服务，否则消费者登记的依赖边与提供者的条目就不在同一张图上。
@@ -368,6 +372,7 @@ async function makeHost(
     disposeTimeoutMs: 3_000,
     disposeBudgetMs: overrides.disposeBudgetMs ?? 0,
     inheritEnv: overrides.inheritEnv ?? false,
+    ...(overrides.onWarning === undefined ? {} : { onWarning: overrides.onWarning }),
     onUnexpectedExit: (pluginId, error) => {
       void hostRef?.reportExternalFailure(pluginId, error.message).catch(() => undefined)
     },
@@ -381,7 +386,7 @@ async function makeHost(
   })
   hostRef = host
   createdHosts.push(host)
-  return { host, loader }
+  return { host, loader, registry }
 }
 
 // ————————————————————————————————— 纯单元：execArgv 推导
@@ -2217,6 +2222,37 @@ test('ADR-0019：隔离提供者可以 last-wins 接管同进程提供者（消�
     assert.equal(
       await hostApi.executeCommand('cross-reverse-consumer', 'svc.now', []),
       'from-isolated',
+    )
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0022：跨 trust last-wins 接管必须写 onWarning（warn 级）', async () => {
+  const warnings: string[] = []
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture(
+    'warn-cross-trust',
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('greeting', { hello: () => 'from-isolated' }, { version: '1.0.0', conflict: 'last-wins' })
+       },
+     }\n`,
+  )
+
+  const { host } = await makeHost(hostApi, { onWarning: (message) => warnings.push(message) })
+  try {
+    // 先放一个同进程提供者（remote=false），再由隔离提供者显式接管
+    host.registry.provide('trusted-original', 'greeting', { hello: () => 'from-trusted' }, { version: '1.0.0' })
+    await host.load(provider)
+    await host.settle()
+
+    assert.ok(
+      warnings.some(
+        (warning) => warning.includes('last-wins') && warning.includes('trusted-original') && warning.includes('ADR-0022'),
+      ),
+      `跨 trust 接管必须走 onWarning 且带上双方 owner 与 ADR 指针，实际：${JSON.stringify(warnings)}`,
     )
   } finally {
     await host.unloadAll().catch(() => undefined)
