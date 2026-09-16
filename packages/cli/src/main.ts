@@ -13,9 +13,11 @@ export const HELP = `vscordis —— 把 Cordis 的时空可组合性带到 VSCo
 
   list                   列出插件并做依赖图检查
     --root <目录>        插件根（默认 plugins）
+    --json               输出机器可读 JSON（CI / 编辑器工具）
 
   doctor                 环境自检（Node / 宿主版本 / 插件根 / 隔离产物 / 验签公钥）
     --root <目录>        插件根（默认 plugins）
+    --json               输出机器可读 JSON（CI / 编辑器工具）
 
   tree                   打印服务依赖图
     --root <目录>        插件根（默认 plugins）
@@ -59,10 +61,10 @@ export async function main(argv: readonly string[], cwd: string): Promise<number
     }
 
     case 'list':
-      return await runList(ctx, flagValue(args, 'root', 'plugins'))
+      return await runList(ctx, flagValue(args, 'root', 'plugins'), { json: hasFlag(args, 'json') })
 
     case 'doctor':
-      return await runDoctor(ctx, flagValue(args, 'root', 'plugins'))
+      return await runDoctor(ctx, flagValue(args, 'root', 'plugins'), { json: hasFlag(args, 'json') })
 
     case 'tree':
       return await runTree(ctx, flagValue(args, 'root', 'plugins'), {

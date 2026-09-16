@@ -294,3 +294,65 @@ test('doctor：插件根不存在只是 warn（discovery 把它当作空根，�
   assert.match(result.out, /插件根不存在/)
   assert.match(result.out, /0 条错误/)
 })
+
+test('list --json：机器可读的插件清单 + 依赖图检查（字段稳定）', async () => {
+  const root = path.join(scratch, `list-json-${runId}`)
+  await writePlugin(root, 'provider', { provides: ['clock'] })
+  await writePlugin(root, 'consumer', {
+    dependencies: { clock: '^1.0.0' },
+    engines: { vscordis: '>=0.1.0' },
+  })
+
+  const result = await run(['list', '--json', '--root', root])
+  assert.equal(result.code, 0, result.err)
+
+  const payload = JSON.parse(result.out) as {
+    root: string
+    plugins: {
+      id: string
+      provides: string[]
+      dependencies: Record<string, string>
+      engines?: { vscordis?: string }
+      permissions: string[]
+      main: string
+    }[]
+    findings: unknown[]
+    problems: string[]
+  }
+  assert.equal(payload.root, root)
+  assert.deepEqual(payload.plugins.map((candidate) => candidate.id).sort(), ['consumer', 'provider'])
+  const consumer = payload.plugins.find((candidate) => candidate.id === 'consumer')
+  assert.deepEqual(consumer?.dependencies, { clock: '^1.0.0' })
+  assert.deepEqual(consumer?.engines, { vscordis: '>=0.1.0' })
+  assert.equal(consumer?.main, 'dist/index.cjs')
+  assert.deepEqual(payload.findings, [])
+  assert.deepEqual(payload.problems, [])
+})
+
+test('list --json：有问题时退出码仍是 1（与文本模式一致）', async () => {
+  const root = path.join(scratch, `list-json-bad-${runId}`)
+  await writePlugin(root, 'broken', { main: '../escape.cjs' })
+
+  const result = await run(['list', '--json', '--root', root])
+  assert.equal(result.code, 1)
+  const payload = JSON.parse(result.out) as { problems: string[] }
+  assert.ok(payload.problems.length >= 1, '坏清单必须体现在 problems 里')
+})
+
+test('doctor --json：checks 带稳定 name，退出码与文本模式一致', async () => {
+  const result = await run(['doctor', '--json'])
+  assert.equal(result.code, 0, result.out)
+
+  const payload = JSON.parse(result.out) as {
+    checks: { name: string; level: 'ok' | 'warn' | 'error'; text: string }[]
+    warnings: number
+    errors: number
+  }
+  assert.deepEqual(
+    payload.checks.map((check) => check.name),
+    ['node-version', 'host-version', 'plugin-root', 'isolation-worker', 'signing-key'],
+  )
+  assert.equal(payload.errors, 0)
+  assert.ok(payload.checks.every((check) => check.level === 'ok' || check.level === 'warn'))
+  assert.equal(payload.warnings, payload.checks.filter((check) => check.level === 'warn').length)
+})

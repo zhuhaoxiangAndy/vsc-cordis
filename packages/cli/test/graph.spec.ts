@@ -127,6 +127,51 @@ test('renderJson：可被 JSON.parse 还原且字段不裁剪（机器可读输�
   assert.ok(text.endsWith('\n'), '以换行结尾，方便直接重定向到文件')
 })
 
+/**
+ * 规模证据（纯函数侧）：500 插件的长链与扇出都要在线性量级内完成。
+ *
+ * `buildGraph` 里有 `plugins.find(...)` 这样的写法（按 id 找提供者），长链/扇出正是会把
+ * 这类 O(n²) 放大到肉眼可见的形状。这里只设**宽松上界**抓灾难性回归，不做性能承诺。
+ */
+test('规模：500 插件的长链与扇出都能在宽松上界内建图（抓 O(n²) 退化）', () => {
+  const COUNT = 500
+
+  const chain: GraphPlugin[] = []
+  for (let index = 0; index < COUNT; index += 1) {
+    chain.push(
+      plugin(`chain-${index}`, {
+        provides: [`svc-${index}`],
+        ...(index === 0 ? {} : { dependencies: { [`svc-${index - 1}`]: '^1.0.0' } }),
+      }),
+    )
+  }
+  const chainStarted = performance.now()
+  const chainGraph = buildGraph(chain, { hostVersion: '0.1.0' })
+  const chainMs = performance.now() - chainStarted
+
+  assert.deepEqual(chainGraph.findings, [])
+  assert.equal(chainGraph.loadOrder.length, COUNT)
+  assert.equal(chainGraph.loadOrder[0], 'chain-0', '提供者必须排在消费者之前')
+  assert.equal(chainGraph.loadOrder.at(-1), `chain-${COUNT - 1}`)
+  assert.ok(chainMs < 2_000, `长链 buildGraph 耗时 ${chainMs.toFixed(1)}ms，超过宽松上界 2s`)
+
+  const fanout: GraphPlugin[] = [plugin('hub', { provides: ['hub'] })]
+  for (let index = 0; index < COUNT; index += 1) {
+    fanout.push(plugin(`leaf-${index}`, { dependencies: { hub: '^1.0.0' } }))
+  }
+  const fanoutStarted = performance.now()
+  const fanoutGraph = buildGraph(fanout, { hostVersion: '0.1.0' })
+  const fanoutMs = performance.now() - fanoutStarted
+
+  assert.deepEqual(fanoutGraph.findings, [])
+  assert.equal(fanoutGraph.consumers.hub?.length, COUNT)
+  assert.ok(fanoutMs < 2_000, `扇出 buildGraph 耗时 ${fanoutMs.toFixed(1)}ms，超过宽松上界 2s`)
+
+  console.log(
+    `  [规模] buildGraph：链 ${chainMs.toFixed(1)}ms / 扇出 ${fanoutMs.toFixed(1)}ms（各 ${COUNT} 插件）`,
+  )
+})
+
 test('findings 排序：error 在前', () => {
   const graph = buildGraph([
     plugin('iso', { trust: 'untrusted', provides: ['clock'] }),

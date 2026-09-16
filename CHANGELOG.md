@@ -23,7 +23,9 @@
 - **可诊断性**：`PluginHost.queueDepth`（串行队列"排队中 + 执行中"的任务数）暴露到
   `vscordis: 显示运行时状态` —— 长时间 >0 就说明某个生命周期任务卡住，比"宿主没反应"精确得多。
 - **快速验收单** `docs/acceptance-quick.md`：≈10 分钟走完五条主线，含 `permissionModel` 逃生开关。
-- **`tree --json`**：依赖图的机器可读输出（CI / 编辑器工具；`--mermaid` 与 `--json` 互斥，同给报用法错误）。
+- **`--json` 全面进 CLI**：`tree --json`（依赖图；与 `--mermaid` 互斥）、`list --json`
+  （插件清单 + findings + problems，退出码与文本模式一致）、`doctor --json`
+  （`{ checks: [{name,level,text}], warnings, errors }`，`name` 是稳定契约）——CI 与编辑器工具可消费。
 - **`vscordis doctor`**：静态环境自检（Node 版本 vs 仓库下界、宿主包版本、插件根与清单问题数、
   隔离后端产物是否已构建、验签公钥是否就位）；error 级问题退出码 1，warn 不失败。
   它**不**代替手动验收 —— 输出里直接写明这一点。
@@ -65,6 +67,7 @@
   `vscode` 解析到 stub）：命令注册/注销与 QuickPick 数据源、executeCommand 权限矩阵、
   窗口消息/状态栏/输出通道的权限与幂等 dispose、只读配置视图、事件订阅与 EffectStack 回收。
   **边界写进文件头**：它覆盖桥接层逻辑，不替代真实 Electron 行为的手动验收。
+- 新增 `buildGraph` 规模测试：500 插件的长链与扇出，宽松上界抓 O(n²) 退化（实测约 14ms 合计）。
 
 ### 文档
 

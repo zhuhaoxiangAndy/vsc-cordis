@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import type { PluginEntry } from '@vscordis/kernel'
 import { discoverPlugins, sortByDependencies } from '../../host/src/discovery.ts'
 import { signPluginDirectory, verifyPluginArtifact } from '../../host/src/integrity.ts'
-import { buildGraph, renderJson, renderMermaid, renderText, type GraphPlugin } from './graph.ts'
+import { buildGraph, renderJson, renderMermaid, renderText, type GraphFinding, type GraphPlugin } from './graph.ts'
 
 /**
  * CLI 命令实现。
@@ -97,11 +97,53 @@ export async function runTree(
   return errors.length > 0 ? 1 : 0
 }
 
-export async function runList(ctx: CommandContext, root: string): Promise<number> {
-  const { entries, problems } = await discover(root)
-  const graph = buildGraph(toGraphPlugins(entries), { hostVersion: readHostVersion() })
+export interface JsonOutputOptions {
+  /** 机器可读输出（`{...}` JSON）；默认文本模式。 */
+  readonly json?: boolean
+}
 
-  ctx.out(`插件（${entries.length}）目录：${path.resolve(root)}`)
+/** `list --json` 的载荷：与文本模式同一批数据，字段名稳定（供 CI / 编辑器工具消费）。 */
+export function listPayload(
+  root: string,
+  entries: readonly PluginEntry[],
+  findings: readonly GraphFinding[],
+  problems: readonly string[],
+): unknown {
+  return {
+    root,
+    plugins: entries.map((entry) => ({
+      id: entry.manifest.id,
+      dir: entry.root,
+      version: entry.manifest.version,
+      trust: entry.manifest.trust,
+      main: entry.manifest.main,
+      permissions: entry.manifest.permissions,
+      provides: entry.manifest.provides,
+      dependencies: entry.manifest.dependencies,
+      engines: entry.manifest.engines,
+    })),
+    findings,
+    problems,
+  }
+}
+
+export async function runList(
+  ctx: CommandContext,
+  root: string,
+  options: JsonOutputOptions = {},
+): Promise<number> {
+  // 相对 root 按 CLI 的 cwd 解析（main(argv, cwd) 的契约），而不是进程 cwd
+  const absoluteRoot = path.resolve(ctx.cwd, root)
+  const { entries, problems } = await discover(absoluteRoot)
+  const graph = buildGraph(toGraphPlugins(entries), { hostVersion: readHostVersion() })
+  const failed = problems.length > 0 || graph.findings.some((finding) => finding.level === 'error')
+
+  if (options.json === true) {
+    ctx.out(JSON.stringify(listPayload(absoluteRoot, entries, graph.findings, problems), null, 2))
+    return failed ? 1 : 0
+  }
+
+  ctx.out(`插件（${entries.length}）目录：${absoluteRoot}`)
   if (entries.length === 0) ctx.out('  <无>')
   for (const entry of entries) {
     const manifest = entry.manifest
@@ -125,12 +167,14 @@ export async function runList(ctx: CommandContext, root: string): Promise<number
   ctx.out(`依赖图检查：${graph.findings.length} 条`)
   for (const finding of graph.findings) ctx.out(`  ${finding.level === 'error' ? '✗' : '⚠'} ${finding.message}`)
 
-  return problems.length > 0 || graph.findings.some((finding) => finding.level === 'error') ? 1 : 0
+  return failed ? 1 : 0
 }
 
 // ————————————————————————————————— doctor：环境自检
 
 interface DoctorLine {
+  /** 稳定的机器可读标识：`doctor --json` 的消费方按它匹配，改名等于破坏契约。 */
+  readonly name: string
   readonly level: 'ok' | 'warn' | 'error'
   readonly text: string
 }
@@ -143,19 +187,29 @@ interface DoctorLine {
  * 那需要手动验收（docs/acceptance-quick.md）。
  *
  * 退出码：只要有一处 `error` 就是 1；`warn` 不影响退出码（例如"还没构建"是可以修的常态）。
+ * `--json` 与文本模式**同一批 checks、同一退出码**，只是渲染方式不同。
  */
-export async function runDoctor(ctx: CommandContext, root: string): Promise<number> {
+export async function runDoctor(
+  ctx: CommandContext,
+  root: string,
+  options: JsonOutputOptions = {},
+): Promise<number> {
   const lines: DoctorLine[] = []
 
   // 1) Node 版本 vs 仓库 engines.node 的下界
   const nodeFloor = readNodeFloor()
   if (nodeFloor === undefined) {
-    lines.push({ level: 'warn', text: `Node ${process.version}（读不到 package.json 的 engines.node，跳过比较）` })
+    lines.push({
+      name: 'node-version',
+      level: 'warn',
+      text: `Node ${process.version}（读不到 package.json 的 engines.node，跳过比较）`,
+    })
   } else {
     const [needMajor, needMinor] = nodeFloor
     const [major = 0, minor = 0] = process.versions.node.split('.').map(Number)
     const satisfied = major > needMajor || (major === needMajor && minor >= needMinor)
     lines.push({
+      name: 'node-version',
       level: satisfied ? 'ok' : 'error',
       text: `Node ${process.version}（仓库要求 >=${needMajor}.${needMinor}）`,
     })
@@ -165,30 +219,28 @@ export async function runDoctor(ctx: CommandContext, root: string): Promise<numb
   const hostVersion = readHostVersion()
   lines.push(
     hostVersion === undefined
-      ? { level: 'warn', text: '读不到 packages/host/package.json 的版本（engines 检查会跳过）' }
-      : { level: 'ok', text: `宿主包版本 ${hostVersion}（packages/host/package.json）` },
+      ? { name: 'host-version', level: 'warn', text: '读不到 packages/host/package.json 的版本（engines 检查会跳过）' }
+      : { name: 'host-version', level: 'ok', text: `宿主包版本 ${hostVersion}（packages/host/package.json）` },
   )
 
   // 3) 插件根与清单问题
   const absoluteRoot = path.resolve(ctx.cwd, root)
   if (!existsSync(absoluteRoot)) {
     lines.push({
+      name: 'plugin-root',
       level: 'warn',
       text: `插件根不存在：${absoluteRoot}（discovery 会当作空根；默认 plugins 在还没建目录时是正常的）`,
     })
   } else {
     const { entries, problems } = await discover(absoluteRoot)
     lines.push({
+      name: 'plugin-root',
       level: 'ok',
       text: `插件根 ${absoluteRoot}：${entries.length} 个插件 / ${problems.length} 条清单问题`,
     })
-    if (problems.length > 0) {
-      const shown = problems.slice(0, 3)
-      lines.push({ level: 'error', text: `清单问题（共 ${problems.length} 条，前 ${shown.length} 条）：` })
-      for (const problem of shown) lines.push({ level: 'error', text: `    ${problem}` })
-      if (problems.length > shown.length) {
-        lines.push({ level: 'error', text: `    …还有 ${problems.length - shown.length} 条` })
-      }
+    // 每条清单问题单独一条 check：JSON 消费方需要精确的失败项，而不是"有 3 条问题"的摘要
+    for (const [index, problem] of problems.entries()) {
+      lines.push({ name: `plugin-manifest[${index}]`, level: 'error', text: problem })
     }
   }
 
@@ -196,8 +248,9 @@ export async function runDoctor(ctx: CommandContext, root: string): Promise<numb
   const workerPath = path.join(cliRepoRoot(), 'packages', 'host', 'dist', 'isolated-worker.cjs')
   lines.push(
     existsSync(workerPath)
-      ? { level: 'ok', text: '隔离后端产物已构建（dist/isolated-worker.cjs）' }
+      ? { name: 'isolation-worker', level: 'ok', text: '隔离后端产物已构建（dist/isolated-worker.cjs）' }
       : {
+          name: 'isolation-worker',
           level: 'warn',
           text: '隔离后端产物不存在：untrusted 插件会被 fail-closed 拒绝 —— 先跑 pnpm run build',
         },
@@ -205,15 +258,21 @@ export async function runDoctor(ctx: CommandContext, root: string): Promise<numb
   const publicKeyPath = path.join(cliRepoRoot(), 'packages', 'host', 'keys', 'vscordis-ed25519.pub.pem')
   lines.push(
     existsSync(publicKeyPath)
-      ? { level: 'ok', text: '验签公钥已就位（packages/host/keys/vscordis-ed25519.pub.pem）' }
-      : { level: 'warn', text: '验签公钥不存在：带签名的插件会被拒绝（docs/signing.md）' },
+      ? { name: 'signing-key', level: 'ok', text: '验签公钥已就位（packages/host/keys/vscordis-ed25519.pub.pem）' }
+      : { name: 'signing-key', level: 'warn', text: '验签公钥不存在：带签名的插件会被拒绝（docs/signing.md）' },
   )
+
+  const errors = lines.filter((line) => line.level === 'error').length
+  const warnings = lines.filter((line) => line.level === 'warn').length
+
+  if (options.json === true) {
+    ctx.out(JSON.stringify({ checks: lines, warnings, errors }, null, 2))
+    return errors > 0 ? 1 : 0
+  }
 
   const icon = (level: DoctorLine['level']): string => (level === 'ok' ? '✓' : level === 'warn' ? '⚠' : '✗')
   ctx.out('vscordis doctor —— 环境自检')
   for (const line of lines) ctx.out(`  ${icon(line.level)} ${line.text}`)
-  const errors = lines.filter((line) => line.level === 'error').length
-  const warnings = lines.filter((line) => line.level === 'warn').length
   ctx.out('')
   ctx.out(`结论：${warnings} 条警告 / ${errors} 条错误`)
   ctx.out('提示：doctor 只做静态自检；隔离与桥接的真实行为需要手动验收（docs/acceptance-quick.md）。')
