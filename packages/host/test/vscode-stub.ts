@@ -74,14 +74,14 @@ export function resetStub(): void {
   state.configUpdates.length = 0
 }
 
-/** 测试用：模拟一次"文档已保存"。 */
-export function emitSave(uri = 'file:///stub/doc.ts'): void {
+/** 测试用：模拟一次"文档已保存"（可指定正文，`getText()` 会返回它）。 */
+export function emitSave(uri = 'file:///stub/doc.ts', text = 'stub'): void {
   const document = {
     uri: { toString: () => uri, fsPath: uri.replace(/^file:\/\//, '') },
     languageId: 'plaintext',
-    lineCount: 1,
+    lineCount: text.split('\n').length,
     version: 1,
-    getText: () => 'stub',
+    getText: () => text,
   }
   for (const listener of [...state.saveListeners]) listener(document)
 }

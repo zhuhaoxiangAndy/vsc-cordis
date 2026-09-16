@@ -212,6 +212,8 @@ export class IsolatedPluginLoader {
    * 状态面板也能显示"当前有几个子进程"，而不必去猜。
    */
   readonly #sessions = new Map<string, IsolatedSession>()
+  /** 累计创建过的会话数（单调递增，见 `sessionsStarted`）。 */
+  #sessionsStarted = 0
   /**
    * 服务名 → 当前提供者（id + 方法表 + **代际 token**）。
    *
@@ -345,6 +347,17 @@ export class IsolatedPluginLoader {
     return this.#sessions.size
   }
 
+  /**
+   * 累计创建过的隔离会话数（单调递增，不随退出减少）。
+   *
+   * 为什么需要它：`activeSessions === 0` 单独看是**可能永远为真**的 ——
+   * 一个"从来没起过进程"的实现也能通过。浸泡测试用这个计数器断言"每轮都真的起了新进程"，
+   * 凑齐"应该 > 0"的另一半。状态面板也可以用它判断"这个宿主到底起过几个子进程"。
+   */
+  get sessionsStarted(): number {
+    return this.#sessionsStarted
+  }
+
   activeSessionIds(): readonly string[] {
     return [...this.#sessions.keys()]
   }
@@ -389,6 +402,7 @@ export class IsolatedPluginLoader {
           log: (message) => this.#log(message),
         })
         ref.session = session
+        this.#sessionsStarted += 1
         // 记账：子进程退出（无论是优雅停用还是被 kill）就把它从活跃表里摘掉。
         this.#sessions.set(pluginId, session)
         void session.waitForExit().then(() => {

@@ -22,7 +22,7 @@ const repoRoot = path.resolve(here, '..', '..', '..')
 const scratch = path.join(here, 'scratch')
 const fixturesRoot = path.join(scratch, 'soak-fixtures')
 
-const CYCLES = 20
+const CYCLES = 40
 
 let workerPromise: Promise<string> | undefined
 function ensureWorker(): Promise<string> {
@@ -214,6 +214,11 @@ test(`隔离浸泡：${CYCLES} 轮起停子进程后，没有残留的活跃会�
       assert.equal(host.view('soak')?.state, 'active', `第 ${cycle} 轮应激活成功`)
       assert.equal(hostApi.commands.size, 1, `第 ${cycle} 轮应恰好注册 1 条命令`)
 
+      // 哨兵（补上"只断言最终为 0"的另一半）：每轮都必须真的起了一个**新**子进程。
+      // 少了这条，一个"从来没起过进程"的实现也能让最后的 activeSessions === 0 通过。
+      assert.equal(loader.activeSessions, 1, `第 ${cycle} 轮应当恰好有 1 个活跃会话`)
+      assert.equal(loader.sessionsStarted, cycle + 1, `第 ${cycle} 轮应当已经起过 ${cycle + 1} 个子进程`)
+
       const result = await hostApi.executeCommand('soak', 'soak.ping', [])
       assert.equal(result, 'pong', `第 ${cycle} 轮反向调用应能拿到子进程 handler 的结果`)
 
@@ -221,6 +226,14 @@ test(`隔离浸泡：${CYCLES} 轮起停子进程后，没有残留的活跃会�
       await host.settle()
 
       assert.equal(hostApi.commands.size, 0, `第 ${cycle} 轮卸载后宿主侧命令必须撤干净`)
+      assert.equal(host.queueDepth, 0, `第 ${cycle} 轮卸载后串行队列应当排空`)
+
+      // 每轮都要等到子进程真的退出，而不是攒到最后再看一次：
+      // 这样"第 N 轮泄漏了一个进程"会立刻定位到具体轮次。
+      for (let attempt = 0; attempt < 60 && loader.activeSessions > 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      assert.equal(loader.activeSessions, 0, `第 ${cycle} 轮卸载后子进程必须退出`)
     }
 
     // 关键断言：子进程都退出了。给一点时间让 exit 事件落地。

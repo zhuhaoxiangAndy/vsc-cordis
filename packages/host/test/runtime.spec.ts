@@ -175,3 +175,75 @@ test('runtime：从磁盘发现 → 自动加载 → 状态面板 → unloadAll�
     await runtime.dispose()
   }
 })
+
+test('runtime：同进程 ctx.async 事件全链路（bridge 订阅 → stub 发射 → kernel 适配器 → 插件）', async () => {
+  const pluginRoot = path.join(scratch, `runtime-async-${runId}`)
+  await writePlugin(
+    pluginRoot,
+    'async-events',
+    { permissions: ['vscode:commands.register', 'vscode:workspace.read'] },
+    `module.exports = {
+       activate: async (ctx) => {
+         let lastEditor = 'none'
+         let lastSave = 'none'
+         const editorSub = await ctx.async.onDidChangeActiveTextEditor((document) => {
+           lastEditor = document === undefined ? '<none>' : document.fsPath
+         })
+         const saveSub = await ctx.async.onDidSaveTextDocument(async (document) => {
+           lastSave = await document.getText()
+         })
+         ctx.effect(() => editorSub, (d) => d.dispose(), 'sub:editor')
+         ctx.effect(() => saveSub, (d) => d.dispose(), 'sub:save')
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('ctxasync.editor', () => lastEditor),
+           (d) => d.dispose(),
+           'cmd:editor',
+         )
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('ctxasync.save', () => lastSave),
+           (d) => d.dispose(),
+           'cmd:save',
+         )
+       },
+     }\n`,
+  )
+  stub.setConfig('vscordis', 'pluginRoots', [pluginRoot])
+  stub.setConfig('vscordis', 'autoLoad', true)
+
+  const runtime = makeRuntime(path.join(scratch, `runtime-async-storage-${runId}`))
+  await runtime.initialize()
+  try {
+    // 这条断言本身就是回归：曾把 onDidChangeActiveTextEditor 错放在 workspace 下，
+    // 于是 ctx.async.onDidChangeActiveTextEditor 在 activate 里抛 TypeError → 插件 failed。
+    assert.equal(runtime.host.view('async-events')?.state, 'active', '事件订阅失败时插件会进入 failed')
+    assert.equal(stub.state.activeEditorListeners.size, 1, 'bridge 应当订阅活动编辑器事件')
+    assert.equal(stub.state.saveListeners.size, 1, 'bridge 应当订阅保存事件')
+
+    stub.emitActiveEditor({
+      document: {
+        uri: { toString: () => 'file:///w/cur.ts', fsPath: '/w/cur.ts' },
+        languageId: 'typescript',
+        lineCount: 1,
+        version: 1,
+        getText: () => 'cur',
+      },
+    })
+    stub.emitSave('file:///w/saved.ts', 'saved text')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    assert.equal(await stub.commands.executeCommand('ctxasync.editor'), '/w/cur.ts')
+    assert.equal(await stub.commands.executeCommand('ctxasync.save'), 'saved text')
+
+    // "没有活动编辑器"必须原样传到插件，而不是被静默跳过
+    stub.emitActiveEditor(undefined)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.equal(await stub.commands.executeCommand('ctxasync.editor'), '<none>')
+
+    await runtime.host.unloadAll()
+    await runtime.host.settle()
+    assert.equal(stub.state.activeEditorListeners.size, 0, '卸载后不得残留活动编辑器监听')
+    assert.equal(stub.state.saveListeners.size, 0, '卸载后不得残留保存监听')
+  } finally {
+    await runtime.dispose()
+  }
+})

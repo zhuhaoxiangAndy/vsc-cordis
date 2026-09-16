@@ -392,7 +392,8 @@ export class Runtime {
         ` · 活跃会话 ${this.#isolatedLoader.activeSessions}` +
         (this.#isolatedLoader.activeSessions === 0
           ? ''
-          : `（${this.#isolatedLoader.activeSessionIds().join(', ')}）`),
+          : `（${this.#isolatedLoader.activeSessionIds().join(', ')}）`) +
+        ` · 累计起过 ${this.#isolatedLoader.sessionsStarted}`,
     )
     lines.push(
       `完整性校验：${this.#publicKeyPem === undefined ? '⚠ 未配置验签公钥（带签名的插件会被拒绝）' : '已配置验签公钥'}` +
