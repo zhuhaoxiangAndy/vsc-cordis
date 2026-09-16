@@ -1,6 +1,7 @@
 import { fork, type ChildProcess } from 'node:child_process'
 import type { CordisPlugin, Disposable, LogLevel, Permission, PluginContext } from '@vscordis/sdk'
-import { PermissionDeniedError, type LoadedPluginModule, type PluginEntry } from '@vscordis/kernel'
+import { PermissionDeniedError, ServiceRegistry, ServiceUnavailableError, describe, type LoadedPluginModule, type PluginEntry } from '@vscordis/kernel'
+import type { EffectScopeApi } from '@vscordis/sdk'
 import { PluginIntegrityError, verifyPluginArtifact } from '../integrity.ts'
 import { buildExecArgv, toIsolatedPermissions, type ExecArgvPlan } from './permissions.ts'
 import {
@@ -89,6 +90,13 @@ export interface IsolatedHostApi {
 
 export interface IsolatedLoaderOptions {
   readonly hostApi: IsolatedHostApi
+  /**
+   * 宿主的服务注册表。
+   *
+   * 隔离插件提供的服务要注册到这里（以 `remote: true` 的**异步代理**形态），
+   * 这样依赖协调、级联暂停、依赖图快照才对它们一样有效（ADR-0019）。
+   */
+  readonly registry: ServiceRegistry
   /** 引导脚本的绝对路径（由 esbuild 打到 dist/isolated-worker.cjs）。 */
   readonly workerPath: string
   readonly publicKeyPem: string | undefined
@@ -104,6 +112,46 @@ interface Deferred<T> {
   readonly promise: Promise<T>
   resolve(value: T): void
   reject(error: unknown): void
+}
+
+/**
+ * 宿主侧为远程服务创建的实例：每个方法 → 一次到提供者子进程的调用。
+ *
+ * 只暴露方法表里声明过的名字。少了这一步，代理只能对任何属性都返回一个函数，
+ * 于是 `clock.nwo()` 会变成一个"调用不存在的方法"的跨进程往返。
+ */
+function createRemoteServiceInstance(
+  service: string,
+  methods: readonly string[],
+  call: (method: string, args: readonly unknown[]) => Promise<unknown>,
+): object {
+  const allowed = new Set(methods)
+  return new Proxy(
+    {},
+    {
+      get(_target, property) {
+        if (typeof property !== 'string') return undefined
+        // 同 child-bootstrap 里的理由：`await proxy` 会探测 `.then`，必须放行成 undefined，
+        // 否则会被当成"调用了不存在的方法 then"。
+        if (property === 'then') return undefined
+        if (!allowed.has(property)) {
+          throw new Error(
+            `远程服务 "${service}" 没有方法 "${property}"。` +
+              `提供者声明的方法：${methods.length === 0 ? '<无>' : methods.join(', ')}`,
+          )
+        }
+        return (...args: unknown[]): Promise<unknown> => call(property, args)
+      },
+    },
+  )
+}
+
+/** 隔离会话向外暴露的服务路由（由 loader 实现并注入）。 */
+interface IsolatedServiceRouter {
+  provide(pluginId: string, name: string, version: string | undefined, methods: readonly string[]): Disposable
+  revoke(pluginId: string, name: string): void
+  use(consumerId: string, name: string, effects: EffectScopeApi): readonly string[]
+  invoke(name: string, method: string, args: readonly unknown[]): Promise<unknown>
 }
 
 function deferred<T>(): Deferred<T> {
@@ -133,9 +181,90 @@ export class IsolatedPluginLoader {
    * 状态面板也能显示"当前有几个子进程"，而不必去猜。
    */
   readonly #sessions = new Map<string, IsolatedSession>()
+  /**
+   * 服务名 → 提供者 id + 方法表（ADR-0019）。
+   *
+   * 方法表就是那份"IDL-lite"：有了它，消费者的代理才能对**不存在的方法**立刻报错，
+   * 而不是把打字错误变成一个跨进程往返。
+   */
+  readonly #remoteServices = new Map<string, { providerId: string; methods: readonly string[] }>()
+  readonly #router: IsolatedServiceRouter
 
   constructor(options: IsolatedLoaderOptions) {
     this.#options = options
+    this.#router = {
+      provide: (pluginId, name, version, methods) => this.#provideRemote(pluginId, name, version, methods),
+      revoke: (pluginId, name) => this.#revokeRemote(pluginId, name),
+      use: (consumerId, name, effects) => this.#useRemote(consumerId, name, effects),
+      invoke: async (name, method, args) => await this.#invokeRemote(name, method, args),
+    }
+  }
+
+  get registry(): ServiceRegistry {
+    return this.#options.registry
+  }
+
+  /** 注册一个由隔离子进程提供的服务：注册表里放的是**宿主侧的异步代理**。 */
+  #provideRemote(
+    pluginId: string,
+    name: string,
+    version: string | undefined,
+    methods: readonly string[],
+  ): Disposable {
+    this.#remoteServices.set(name, { providerId: pluginId, methods })
+    const instance = createRemoteServiceInstance(name, methods, (method, args) =>
+      this.#invokeRemote(name, method, args),
+    )
+    const handle = this.#options.registry.provide(pluginId, name, instance, {
+      ...(version === undefined ? {} : { version }),
+      remote: true,
+    })
+    let disposed = false
+    return {
+      dispose: (): void => {
+        if (disposed) return
+        disposed = true
+        this.#remoteServices.delete(name)
+        handle.dispose()
+      },
+    }
+  }
+
+  #revokeRemote(pluginId: string, name: string): void {
+    const entry = this.#remoteServices.get(name)
+    if (entry?.providerId !== pluginId) return
+    this.#remoteServices.delete(name)
+    this.#options.registry.revoke(pluginId, name)
+  }
+
+  /**
+   * 隔离消费者取用服务：登记依赖边（这样提供者离开会被级联暂停），并返回方法表。
+   *
+   * 同进程插件提供的服务在这里**明确拒绝** —— 活对象过不了进程边界，
+   * 而"给个会抛错的假代理"只会把问题推到运行时。
+   */
+  #useRemote(consumerId: string, name: string, effects: EffectScopeApi): readonly string[] {
+    const info = this.#options.registry.providerInfo(name)
+    if (info === undefined) throw new ServiceUnavailableError(name)
+    if (!info.remote) {
+      throw new Error(
+        `服务 "${name}" 由**同进程**插件 "${info.owner}" 提供，隔离插件无法取用（活对象过不了进程边界）。\n` +
+          '两个选择：把提供者也改成 trust: untrusted，或让消费者改用 trust: trusted。',
+      )
+    }
+    const edge = this.#options.registry.depend(consumerId, name, 'hard')
+    effects.add(() => edge.dispose(), `depend:async:${name}`)
+    return this.#remoteServices.get(name)?.methods ?? []
+  }
+
+  async #invokeRemote(name: string, method: string, args: readonly unknown[]): Promise<unknown> {
+    const entry = this.#remoteServices.get(name)
+    if (entry === undefined) throw new Error(`远程服务 "${name}" 已不可用（提供者可能已卸载）`)
+    const session = this.#sessions.get(entry.providerId)
+    if (session === undefined) {
+      throw new Error(`远程服务 "${name}" 的提供者插件 "${entry.providerId}" 当前不在运行中`)
+    }
+    return await session.invokeServiceMethod(name, method, args)
   }
 
   get activeSessions(): number {
@@ -178,6 +307,7 @@ export class IsolatedPluginLoader {
           entry,
           plan,
           hostApi: this.#options.hostApi,
+          services: this.#router,
           workerPath: this.#options.workerPath,
           readyTimeoutMs: this.#options.readyTimeoutMs ?? 10_000,
           disposeTimeoutMs: this.#options.disposeTimeoutMs ?? 2_000,
@@ -189,6 +319,9 @@ export class IsolatedPluginLoader {
         void session.waitForExit().then(() => {
           if (this.#sessions.get(pluginId) === session) this.#sessions.delete(pluginId)
         })
+        // 必须在 start() **之前**交棒：子进程在 activate 期间就可能调用
+        // `ctx.async.useService`，而它需要在宿主的 EffectStack 上登记依赖边。
+        session.attachHostEffects(ctx.effects)
         try {
           await session.start()
         } catch (error) {
@@ -229,6 +362,7 @@ interface SessionOptions {
   readonly entry: PluginEntry
   readonly plan: ExecArgvPlan
   readonly hostApi: IsolatedHostApi
+  readonly services: IsolatedServiceRouter
   readonly workerPath: string
   readonly readyTimeoutMs: number
   readonly disposeTimeoutMs: number
@@ -246,10 +380,24 @@ class IsolatedSession {
   readonly #outputHandles = new Set<number>()
   readonly #statusBarHandles = new Set<number>()
   readonly #eventSubscriptions = new Map<number, Disposable>()
+  readonly #providedServiceDisposables = new Map<string, Disposable>()
+  readonly #serviceInvokes = new Map<number, Deferred<unknown>>()
+  #hostEffects: EffectScopeApi | undefined
+  #serviceRequestSeq = 0
   #eventSeq = 0
   #configSubscription: Disposable | undefined
   #child: ChildProcess | undefined
-  #exited: Promise<void> = Promise.resolve()
+  /**
+   * 子进程退出信号。
+   *
+   * ⚠️ 这里**必须**是"字段初始化时就存在的 deferred"，而不能在 `start()` 里才赋值 Promise：
+   * loader 会在 `start()` **之前**登记会话并调用 `waitForExit()`，
+   * 那时若拿到一个初始的已 resolve 的 Promise，`.then` 会立刻执行 —— 会话被误删，
+   * 于是"活跃会话数"永远是 0。
+   * 这不是假想：M4b 的浸泡测试曾因此一直是**假绿**（它测的不是"没有泄漏"，
+   * 而是"记账根本没生效"）。ADR-0019 里记了这一笔。
+   */
+  readonly #exited = deferred<void>()
   #requestSeq = 0
   #closed = false
 
@@ -260,6 +408,29 @@ class IsolatedSession {
 
   get pluginId(): string {
     return this.#pluginId
+  }
+
+  /**
+   * 把宿主侧的 EffectStack 交给会话。
+   *
+   * 用途只有一个但很关键：隔离消费者调用 `ctx.async.useService` 时，
+   * 依赖边必须登记在**宿主**的注册表上、并挂在宿主的 EffectStack 上 ——
+   * 这样"提供者卸载 → 消费者 paused"的级联才对隔离插件一样有效。
+   */
+  attachHostEffects(effects: EffectScopeApi): void {
+    this.#hostEffects = effects
+  }
+
+  /** 宿主反向请求：在本会话的子进程里执行一次服务方法调用。 */
+  async invokeServiceMethod(service: string, method: string, args: readonly unknown[]): Promise<unknown> {
+    if (!this.alive) {
+      throw new Error(`插件 ${this.#pluginId} 的子进程已退出，无法调用 ${service}.${method}()`)
+    }
+    const requestId = ++this.#serviceRequestSeq
+    const pending = deferred<unknown>()
+    this.#serviceInvokes.set(requestId, pending)
+    this.#send({ kind: 'invokeService', requestId, service, method, args })
+    return await pending.promise
   }
 
   get pid(): number | undefined {
@@ -297,14 +468,13 @@ class IsolatedSession {
       this.#failAll(`子进程错误：${errorToWire(error)}`)
     })
 
-    this.#exited = new Promise<void>((resolve) => {
-      child.on('exit', (code, signal) => {
-        this.#cleanupHostSide()
-        const detail = `退出码 ${code ?? 'null'} / 信号 ${signal ?? 'none'}`
-        if (!this.#closed) this.#options.log(`[${this.#pluginId}] 子进程退出（${detail}）`)
-        this.#deactivated.resolve()
-        resolve()
-      })
+    this.#exited.promise.catch(() => undefined)
+    child.on('exit', (code, signal) => {
+      this.#cleanupHostSide()
+      const detail = `退出码 ${code ?? 'null'} / 信号 ${signal ?? 'none'}`
+      if (!this.#closed) this.#options.log(`[${this.#pluginId}] 子进程退出（${detail}）`)
+      this.#deactivated.resolve()
+      this.#exited.resolve()
     })
 
     await withTimeout(this.#ready.promise, this.#options.readyTimeoutMs, `等待子进程就绪（${this.#pluginId}）`)
@@ -378,7 +548,7 @@ class IsolatedSession {
   }
 
   async waitForExit(): Promise<void> {
-    await this.#exited
+    await this.#exited.promise
   }
 
   // ————————————————————————————————— 内部
@@ -416,6 +586,14 @@ class IsolatedSession {
         const pending = this.#invokes.get(message.requestId)
         if (pending === undefined) return
         this.#invokes.delete(message.requestId)
+        if (message.ok) pending.resolve(message.value)
+        else pending.reject(new Error(message.error))
+        break
+      }
+      case 'serviceResult': {
+        const pending = this.#serviceInvokes.get(message.requestId)
+        if (pending === undefined) return
+        this.#serviceInvokes.delete(message.requestId)
         if (message.ok) pending.resolve(message.value)
         else pending.reject(new Error(message.error))
         break
@@ -569,6 +747,40 @@ class IsolatedSession {
           this.#reply(call.id, await this.#options.hostApi.readDocumentText(pluginId, Number(call.args[0])))
           break
         }
+        case 'services.provide': {
+          const name = String(call.args[0] ?? '')
+          const rawVersion = call.args[1]
+          const version = rawVersion === null || rawVersion === undefined ? undefined : String(rawVersion)
+          const methods = Array.isArray(call.args[2]) ? (call.args[2] as unknown[]).map((item) => String(item)) : []
+          const disposable = this.#options.services.provide(this.#pluginId, name, version, methods)
+          this.#providedServiceDisposables.set(name, disposable)
+          this.#reply(call.id, undefined)
+          break
+        }
+        case 'services.revoke': {
+          const name = String(call.args[0] ?? '')
+          this.#providedServiceDisposables.get(name)?.dispose()
+          this.#providedServiceDisposables.delete(name)
+          this.#reply(call.id, undefined)
+          break
+        }
+        case 'services.use': {
+          const name = String(call.args[0] ?? '')
+          const effects = this.#hostEffects
+          if (effects === undefined) {
+            throw new Error('宿主上下文尚未就绪，无法为 ctx.async.useService 登记依赖边')
+          }
+          const methods = this.#options.services.use(this.#pluginId, name, effects)
+          this.#reply(call.id, { methods })
+          break
+        }
+        case 'services.invoke': {
+          const name = String(call.args[0] ?? '')
+          const method = String(call.args[1] ?? '')
+          const args = Array.isArray(call.args[2]) ? (call.args[2] as unknown[]) : []
+          this.#reply(call.id, await this.#options.services.invoke(name, method, args))
+          break
+        }
         case 'log': {
           this.#options.hostApi.log(pluginId, 'info', String(call.args[0] ?? ''))
           this.#reply(call.id, undefined)
@@ -592,7 +804,21 @@ class IsolatedSession {
    * 子进程退出/被杀时，撤销**所有**宿主侧注册。
    * 少了这一步，卸载后命令面板代理里会残留幽灵命令 —— 与 M1 那条验收标准同源。
    */
+  /**
+   * 子进程退出/被杀时，撤销**所有**宿主侧注册。少了这一步，卸载后会留下幽灵命令 ——
+   * 与 M1 那条验收标准同源。服务同理：注册表里的条目不清，消费者会拿到一个
+   * 指向死进程的代理（调用时报错时机还很晚）。
+   */
   #cleanupHostSide(): void {
+    for (const [, disposable] of this.#providedServiceDisposables) {
+      try {
+        disposable.dispose()
+      } catch {
+        // 撤销失败不应影响其余清理
+      }
+    }
+    this.#providedServiceDisposables.clear()
+
     for (const [, handle] of this.#commandHandles) {
       try {
         handle.dispose()
@@ -643,6 +869,9 @@ class IsolatedSession {
   #failAll(reason: string): void {
     for (const [, pending] of this.#invokes) pending.reject(new Error(reason))
     this.#invokes.clear()
+    // 在途的服务调用也必须一起失败：否则消费者会永远等一个已经死掉的进程。
+    for (const [, pending] of this.#serviceInvokes) pending.reject(new Error(reason))
+    this.#serviceInvokes.clear()
   }
 }
 

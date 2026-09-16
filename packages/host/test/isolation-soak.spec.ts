@@ -4,7 +4,7 @@ import * as path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { build, stop } from 'esbuild'
-import { PluginHost, type HostPort, type PluginEntry } from '@vscordis/kernel'
+import { PluginHost, ServiceRegistry, type HostPort, type PluginEntry } from '@vscordis/kernel'
 import type { LogLevel, PluginVscodeApi } from '@vscordis/sdk'
 import { IsolatedPluginLoader, type IsolatedHostApi } from '../src/isolation/isolated-loader.ts'
 import type { SerializedWorkspaceFolder } from '../src/isolation/protocol.ts'
@@ -187,14 +187,21 @@ test(`隔离浸泡：${CYCLES} 轮起停子进程后，没有残留的活跃会�
   }
 
   const hostApi = new SilentHostApi()
+  const registry = new ServiceRegistry()
   const loader = new IsolatedPluginLoader({
     hostApi,
+    registry,
     workerPath,
     publicKeyPem: undefined,
     readyTimeoutMs: 15_000,
     disposeTimeoutMs: 3_000,
   })
-  const host = new PluginHost({ port: new IsolationPort(loader), disposeTimeoutMs: 4_000, activationTimeoutMs: 20_000 })
+  const host = new PluginHost({
+    port: new IsolationPort(loader),
+    registry,
+    disposeTimeoutMs: 4_000,
+    activationTimeoutMs: 20_000,
+  })
 
   try {
     for (let cycle = 0; cycle < CYCLES; cycle += 1) {

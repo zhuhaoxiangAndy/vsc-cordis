@@ -11,6 +11,7 @@ export type { PluginManifest, PluginTrust } from './manifest.ts'
 
 export type {
   AsyncApi,
+  AsyncService,
   AsyncTextDocument,
   DependencyEdgeView,
   DependencyGraphSnapshot,

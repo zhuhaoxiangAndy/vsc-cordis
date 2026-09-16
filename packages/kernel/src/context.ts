@@ -1,4 +1,5 @@
 import type {
+  AsyncService,
   DependencyGraphSnapshot,
   DependencyKind,
   Disposable,
@@ -13,6 +14,41 @@ import type {
 import type { EffectStack } from './effect-stack.ts'
 import type { NormalizedManifest } from './manifest.ts'
 import type { ServiceRegistry } from './service-registry.ts'
+
+/**
+ * 把服务实例包成"方法全异步"的代理（`ctx.async.useService` 的实现）。
+ *
+ * - **方法**：包一层 `Promise.resolve`。本地方法本来返回 Promise 也没问题。
+ * - **数据属性**：**抛错**而不是返回 undefined。类型层已经把非方法属性映射成 `never`，
+ *   运行期也不该给出一个静默无效的值 —— 那是本项目一贯拒绝的形态。
+ * - 不存在的属性：按常规返回 `undefined`（`in` 检查走原型链，所以类的实例方法能被识别）。
+ */
+export function wrapAsyncService<T>(instance: unknown): AsyncService<T> {
+  if (instance === null || (typeof instance !== 'object' && typeof instance !== 'function')) {
+    throw new Error('ctx.async.useService 只能用于对象形式的服务（方法调用需要一个接收者）')
+  }
+  const target = instance as Record<string | symbol, unknown>
+  return new Proxy(target, {
+    get(receiver, property, proxy) {
+      const value = Reflect.get(receiver, property, proxy)
+      if (typeof property === 'symbol') return value
+      // ⚠️ `then` 必须原样透出（通常是 undefined）：`await ctx.async.useService(name)` 会探测 `.then`，
+      // 若这里对未知属性抛错，就会炸在"调用了不存在的方法 then"上。
+      if (property === 'then') return value
+      if (typeof value === 'function') {
+        return (...args: unknown[]): Promise<unknown> => Promise.resolve(value.apply(receiver, args))
+      }
+      if (property in receiver) {
+        throw new Error(
+          `异步服务只支持方法调用：属性 "${property}" 是数据字段。` +
+            '跨进程传不了活对象 —— 请把它做成快照式 API（每次调用返回数据），' +
+            '或改用 trust: trusted 的同进程服务（ADR-0019）。',
+        )
+      }
+      return value
+    },
+  }) as AsyncService<T>
+}
 
 export interface PluginContextDeps {
   readonly id: PluginId
@@ -69,6 +105,13 @@ export function createPluginContext(deps: PluginContextDeps): PluginContext {
         // 走 EffectStack：插件即使忘了 dispose，卸载时也会被回收。
         effects.add(() => disposable.dispose(), 'async:onDidSaveTextDocument')
         return disposable
+      },
+      useService: async <T,>(name: ServiceName): Promise<AsyncService<T>> => {
+        // 与 ctx.use 一样登记硬依赖边：提供者离开时本插件会被 paused。
+        const range = manifest.dependencies[name]
+        const edge: Disposable = registry.depend(id, name, 'hard', range)
+        effects.add(() => edge.dispose(), `depend:async:${name}`)
+        return wrapAsyncService<T>(registry.resolveForAsync<T>(name, range))
       },
     },
 

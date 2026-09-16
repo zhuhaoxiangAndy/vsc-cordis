@@ -30,6 +30,23 @@ export interface ProvideOptions {
   readonly conflict?: 'exclusive' | 'last-wins'
   /** 服务版本，用于满足消费者的 `dependencies` 版本范围。 */
   readonly version?: string
+  /**
+   * 声明该服务位于**独立进程**：消费者不能用 `ctx.use` 同步取用，只能用 `ctx.async.useService`。
+   * 隔离模式由宿主自动置位；同进程插件一般不需要关心它。
+   */
+  readonly remote?: boolean
+}
+
+/**
+ * 异步服务的形状：**只保留方法**，且每个方法都返回 Promise。
+ *
+ * 非方法属性映射成 `never` —— 这是刻意的：跨进程传不了活对象，
+ * 让它在**编译期**就不可用，而不是运行时给出 undefined。
+ */
+export type AsyncService<T> = {
+  readonly [K in keyof T]: T[K] extends (...args: infer A) => infer R
+    ? (...args: A) => Promise<Awaited<R>>
+    : never
 }
 
 export type DependencyKind = 'hard' | 'soft'
@@ -58,7 +75,13 @@ export interface DependencyEdgeView {
 
 export interface ServiceView {
   readonly name: ServiceName
-  readonly provider?: { readonly owner: PluginId; readonly version?: string; readonly generation: number }
+  readonly provider?: {
+    readonly owner: PluginId
+    readonly version?: string
+    readonly generation: number
+    /** 提供者位于独立进程：只能用 `ctx.async.useService` 取用（ADR-0019）。 */
+    readonly remote?: boolean
+  }
   readonly consumers: readonly { readonly owner: PluginId; readonly kind: DependencyKind }[]
 }
 
@@ -100,6 +123,13 @@ export interface AsyncApi {
    * 同进程模式下它立刻 resolve，但**签名保持一致**。
    */
   onDidSaveTextDocument(listener: (document: AsyncTextDocument) => void): Promise<Disposable>
+  /**
+   * 取用一个服务，返回**方法全异步**的代理（ADR-0019）。
+   *
+   * 两种模式都能用，且签名一致 —— 服务在本进程时，代理只是把返回值包一层 Promise。
+   * 这是一个**硬依赖**：提供者离开时，本插件会被 `paused`（与 `ctx.use` 一致）。
+   */
+  useService<T>(name: ServiceName): Promise<AsyncService<T>>
 }
 
 export interface PluginContext {

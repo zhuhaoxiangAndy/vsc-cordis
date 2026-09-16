@@ -115,3 +115,26 @@ export class PluginEngineMismatchError extends VscordisError {
     this.problems = problems
   }
 }
+
+/**
+ * 该服务由**隔离子进程**提供，只能用显式异步面取用（ADR-0019）。
+ *
+ * 为什么必须拒绝而不是"返回一个方法变成 Promise 的代理"：
+ * `ctx.use('clock')` 的类型是同步的（`clock.now()` 返回 `Date`）。
+ * 返回异步代理会让类型撒谎 —— 插件在运行时才发现拿到的是 Promise。
+ * 所以同步入口在这里**响亮失败**，并把替代路径写在错误信息里。
+ */
+export class RemoteServiceError extends VscordisError {
+  readonly service: string
+  readonly provider: string
+
+  constructor(service: string, provider: string) {
+    super(
+      `服务 "${service}" 由隔离插件 "${provider}" 提供，不能用 ctx.use 同步取用。` +
+        '请改用 **ctx.async.useService(name)** —— 它返回的方法都是异步的（两种模式下签名一致）。',
+    )
+    this.name = 'RemoteServiceError'
+    this.service = service
+    this.provider = provider
+  }
+}

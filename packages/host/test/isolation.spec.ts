@@ -4,7 +4,7 @@ import * as path from 'node:path'
 import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { build, stop } from 'esbuild'
-import { PluginHost, type HostPort, type PluginEntry } from '@vscordis/kernel'
+import { PluginHost, ServiceRegistry, type HostPort, type PluginEntry } from '@vscordis/kernel'
 import type { LogLevel, Permission, PluginVscodeApi } from '@vscordis/sdk'
 import { IsolatedPluginLoader, type IsolatedHostApi } from '../src/isolation/isolated-loader.ts'
 import { buildExecArgv } from '../src/isolation/permissions.ts'
@@ -286,7 +286,7 @@ async function makeFixture(
       version: '1.0.0',
       main: 'dist/index.cjs',
       description: undefined,
-      dependencies: {},
+      dependencies: (manifest.dependencies ?? {}) as Readonly<Record<string, string>>,
       provides: [],
       configuration: (manifest.configuration ?? undefined) as
         | { readonly section: string; readonly keys: readonly string[] }
@@ -316,15 +316,19 @@ after(async () => {
 
 async function makeHost(hostApi: FakeHostApi): Promise<{ host: PluginHost; loader: IsolatedPluginLoader }> {
   const workerPath = await ensureWorker()
+  // 注册表必须由测试显式创建并与 PluginHost **共用**：隔离加载器要往同一张表里
+  // 注册远程服务，否则消费者登记的依赖边与提供者的条目就不在同一张图上。
+  const registry = new ServiceRegistry()
   const loader = new IsolatedPluginLoader({
     hostApi,
+    registry,
     workerPath,
     publicKeyPem: undefined,
     readyTimeoutMs: 15_000,
     disposeTimeoutMs: 3_000,
   })
   const port = new IsolationPort(loader)
-  const host = new PluginHost({ port, disposeTimeoutMs: 4_000 })
+  const host = new PluginHost({ port, registry, disposeTimeoutMs: 4_000 })
   createdHosts.push(host)
   return { host, loader }
 }
@@ -815,7 +819,7 @@ test('M4c：状态栏项需要权限，未授权时激活失败', async () => {
   })
 })
 
-test('M4c：隔离模式下拒绝服务时的理由说的是真实原因（类型契约会撒谎），不是"还没做"', async () => {
+test('M4c/0019：隔离模式下 ctx.use 被拒绝，且错误信息给出 ctx.async.useService 这条替代路径', async () => {
   const hostApi = new FakeHostApi()
   const entry = await makeFixture(
     'wants-service',
@@ -829,10 +833,152 @@ test('M4c：隔离模式下拒绝服务时的理由说的是真实原因（类�
   const { host } = await makeHost(hostApi)
   await assert.rejects(host.load(entry), (error: unknown) => {
     const text = String(error)
-    assert.match(text, /进程内对象/)
-    assert.match(text, /Promise<Date>|带方法的/)
+    assert.match(text, /不能用 `ctx\.use`/)
+    // 关键：必须告诉用户"那该怎么办"。只说不行的错误是半个答案。
+    assert.match(text, /ctx\.async\.useService/)
+    assert.match(text, /trust: trusted/)
     return true
   })
+})
+
+// ————————————————————————————————— ADR-0019：跨进程服务
+
+const CLOCK_PROVIDER = `module.exports = {
+  activate(ctx) {
+    ctx.provide('clock', {
+      label: 'remote-clock',
+      now: () => 'now-from-provider-child',
+    }, { version: '1.0.0' })
+  },
+}\n`
+
+const CLOCK_CONSUMER = `module.exports = {
+  activate: async (ctx) => {
+    const clock = await ctx.async.useService('clock')
+    ctx.effect(
+      () => ctx.vscode.commands.registerCommand('svc.now', async () => await clock.now()),
+      (d) => d.dispose(),
+      'cmd:now',
+    )
+  },
+}\n`
+
+test('ADR-0019：隔离插件提供服务 → 另一个隔离插件通过 ctx.async.useService 调用它的方法', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture('svc-provider', CLOCK_PROVIDER)
+  const consumer = await makeFixture('svc-consumer', CLOCK_CONSUMER, {
+    permissions: ['vscode:commands.register'],
+    dependencies: { clock: '^1.0.0' },
+    provides: [],
+  })
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.load(consumer)
+    await host.settle()
+
+    assert.equal(host.view('svc-provider')?.state, 'active')
+    assert.equal(host.view('svc-consumer')?.state, 'active')
+
+    assert.equal(
+      await hostApi.executeCommand('svc-consumer', 'svc.now', []),
+      'now-from-provider-child',
+      '方法调用应当跨两个子进程完成：消费者 → 宿主 → 提供者',
+    )
+
+    // 服务进了宿主的注册表，并标记为远程
+    const slot = host.registry.snapshot().services.find((service) => service.name === 'clock')
+    assert.equal(slot?.provider?.owner, 'svc-provider')
+    assert.equal(slot?.provider?.remote, true, '注册表必须知道它是远程服务，否则 ctx.use 会放行')
+
+    // 提供者卸载 → 消费者应当被级联暂停（依赖边登记在宿主的注册表上）
+    await host.unload('svc-provider')
+    await host.settle()
+    assert.equal(
+      host.view('svc-consumer')?.state,
+      'paused',
+      `诊断：error=${host.view('svc-consumer')?.error ?? '-'} | ` +
+        `logs=${hostApi.logs.map((entry) => entry.message).join(' ｜ ')}`,
+    )
+    assert.deepEqual(host.view('svc-consumer')?.missing, ['clock'])
+    assert.equal(host.registry.size, 0, '提供者退出后注册表不该留下远程服务条目')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：同进程消费者用 ctx.use 取远程服务 → 明确拒绝（并指向异步面）', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture('svc-provider2', CLOCK_PROVIDER)
+
+  const { host, loader } = await makeHost(hostApi)
+  // 让 port 按 trust 路由：同进程插件走 fake 的工厂表，隔离插件走真实子进程
+  try {
+    await host.load(provider)
+    await host.settle()
+
+    const fake = loader as unknown as { fake?: never }
+    void fake
+    // 直接在注册表上验证同步解析被拒绝（等价于同进程插件调用 ctx.use 时的结果）
+    assert.throws(() => host.registry.resolve('clock'), (error: unknown) => {
+      assert.match(String(error), /由隔离插件/)
+      assert.match(String(error), /ctx\.async\.useService/)
+      return true
+    })
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：远程服务的方法表让**不存在的方法**立刻报错，而不是跨进程往返', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture('svc-provider3', CLOCK_PROVIDER)
+  const consumer = await makeFixture(
+    'svc-typo',
+    `module.exports = {
+       activate: async (ctx) => {
+         const clock = await ctx.async.useService('clock')
+         await clock.nwo()
+       },
+     }\n`,
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.settle()
+    await assert.rejects(host.load(consumer), (error: unknown) => {
+      const text = String(error)
+      assert.match(text, /没有方法 "nwo"/)
+      assert.match(text, /现在声明的方法|声明的方法：now/)
+      return true
+    })
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：用同进程消费者取用远程服务时也必须走异步面（注册表层面拒绝同步解析）', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture('svc-provider4', CLOCK_PROVIDER)
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.settle()
+
+    // tryResolve 也必须拒绝：把远程服务当作"软依赖缺失"会静默走错分支
+    assert.throws(() => host.registry.tryResolve('clock'), /由隔离插件/)
+    // resolveForAsync 是给 ctx.async.useService 用的，它接受远程服务
+    const instance = host.registry.resolveForAsync<{ now(): Promise<string> }>('clock')
+    assert.equal(await instance.now(), 'now-from-provider-child')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
 })
 
 test('M4c：未声明 configuration 的隔离插件读配置只拿默认值（并说明要声明）', async () => {

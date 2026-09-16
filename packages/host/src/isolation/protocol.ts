@@ -36,6 +36,10 @@ export type HostMethod =
   | 'events.onDidSaveTextDocument'
   | 'events.unsubscribe'
   | 'document.getText'
+  | 'services.provide'
+  | 'services.revoke'
+  | 'services.use'
+  | 'services.invoke'
 
 export interface IsolatedPermissions {
   readonly commands: {
@@ -105,6 +109,19 @@ export type HostToChild =
   | { readonly kind: 'configChanged'; readonly values: Readonly<Record<string, unknown>> }
   /** 宿主 → 子进程的事件转发。`subscription` 是宿主分配的句柄，子进程按它派发给对应监听器。 */
   | { readonly kind: 'event'; readonly subscription: number; readonly payload: SerializedSaveEvent }
+  /**
+   * 宿主 → 子进程的**服务方法调用**（ADR-0019）。
+   *
+   * 与命令的 `invoke` 是同一类：函数传不过 IPC，所以"调用一个方法"必须变成
+   * "请对方在自己的进程里执行并回传结果"。
+   */
+  | {
+      readonly kind: 'invokeService'
+      readonly requestId: number
+      readonly service: string
+      readonly method: string
+      readonly args: readonly unknown[]
+    }
   | { readonly kind: 'response'; readonly id: number; readonly ok: true; readonly value: unknown }
   | { readonly kind: 'response'; readonly id: number; readonly ok: false; readonly error: string }
   | { readonly kind: 'invoke'; readonly requestId: number; readonly command: string; readonly args: readonly unknown[] }
@@ -120,6 +137,8 @@ export type ChildToHost =
   | { readonly kind: 'result'; readonly requestId: number; readonly ok: true; readonly value: unknown }
   | { readonly kind: 'result'; readonly requestId: number; readonly ok: false; readonly error: string }
   | { readonly kind: 'log'; readonly level: LogLevel; readonly message: string }
+  | { readonly kind: 'serviceResult'; readonly requestId: number; readonly ok: true; readonly value: unknown }
+  | { readonly kind: 'serviceResult'; readonly requestId: number; readonly ok: false; readonly error: string }
 
 export function errorToWire(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`
@@ -138,12 +157,14 @@ export const ISOLATION_UNSUPPORTED: Readonly<Record<string, string>> = {
     '带 `getText()` / `positionAt()` 这类**同步方法**，跨进程没法诚实履行。\n' +
     '请改用 **`ctx.async.onDidSaveTextDocument`** —— 那份 API 在两种模式下签名一致，' +
     '回调收到的是纯数据快照 + 显式异步的 `getText()`。详见 ADR-0018。',
-  'services':
-    '隔离模式下不支持 ctx.use / ctx.provide。原因同上但更严重：服务是**带方法的进程内对象**，' +
-    '跨进程代理会让 clock.now() 从返回 Date 变成返回 Promise<Date>。\n' +
-    '与事件不同，这里**没有** `ctx.async` 的对等物：跨进程服务需要一套方法级 RPC 协议，尚未实现' +
-    '（见 ADR-0018 的"未覆盖"）。需要服务协作的插件请用 trust: trusted' +
-    '（并接受"只防误用、不防恶意"，见 ADR-0003）。',
+  'services.syncConsumer':
+    '隔离模式下不能用 `ctx.use` / `ctx.tryUse`：它们的类型是**同步**的（`clock.now()` 返回 `Date`），\n' +
+    '而跨进程的服务调用只能是异步的。\n' +
+    '    · 如果提供者也在隔离进程里 → 用 **`ctx.async.useService(name)`**（锚定 ADR-0019）；\n' +
+    '    · 如果提供者在同进程里 → 隔离模式**无法**取用（活对象过不去），请改用 trust: trusted。',
+  'services.graph':
+    '隔离模式下拿不到 `ctx.graph()` 的依赖图快照：图在宿主的注册表里，而子进程只有自己的一份。' +
+    '要看依赖图请在宿主里用 `vscordis: 显示运行时状态`，或用 CLI 的 `vscordis tree`。',
 }
 
 export function unsupportedReason(member: string): string {

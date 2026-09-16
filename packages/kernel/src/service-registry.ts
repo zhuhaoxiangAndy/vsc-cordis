@@ -8,13 +8,20 @@ import type {
   ServiceName,
   ServiceView,
 } from '@vscordis/sdk'
-import { ServiceConflictError, ServiceUnavailableError, ServiceVersionMismatchError } from './errors.ts'
+import { RemoteServiceError, ServiceConflictError, ServiceUnavailableError, ServiceVersionMismatchError } from './errors.ts'
 import { satisfies } from './semver-mini.ts'
 
 export interface ServiceProviderRecord {
   readonly owner: PluginId
   readonly version: string | undefined
   readonly instance: unknown
+  /**
+   * 该提供者位于**独立进程**（ADR-0019）。
+   *
+   * 这面标记让同步的 `resolve()` 能拒绝远程服务（`clock.now()` 的类型是 `Date`，
+   * 返回异步代理就是撒谎），同时让 `ctx.async.useService` 知道该走异步路径。
+   */
+  readonly remote: boolean
 }
 
 export interface ServiceChangeEvent {
@@ -92,7 +99,7 @@ export class ServiceRegistry {
 
     const affected = existing !== undefined && existing.owner !== owner ? this.affectedBy(existing.owner) : []
 
-    slot.provider = { owner, version: options.version, instance }
+    slot.provider = { owner, version: options.version, instance, remote: options.remote === true }
     slot.generation += 1
     let mine = this.#provides.get(owner)
     if (mine === undefined) {
@@ -135,8 +142,39 @@ export class ServiceRegistry {
     this.#emit({ name, kind: 'revoked', previous, current: undefined, affected })
   }
 
-  /** 严格解析：缺失或版本不满足都会抛错。 */
+  /**
+   * 严格解析：缺失、版本不满足、**或提供者在独立进程**都会抛错。
+   *
+   * 最后一条是刻意的（ADR-0019）：`ctx.use('clock')` 的类型是同步的，
+   * 而远程服务的每个方法只能异步返回。返回一个"方法变成 Promise"的代理就是类型撒谎，
+   * 所以这里响亮失败，并把替代路径（`ctx.async.useService`）写在错误信息里。
+   */
   resolve<T>(name: ServiceName, range?: string): T {
+    const provider = this.#slots.get(name)?.provider
+    if (provider === undefined) throw new ServiceUnavailableError(name, range)
+    if (range !== undefined && range !== '*' && !satisfies(provider.version ?? '', range)) {
+      throw new ServiceVersionMismatchError(name, range, provider.version)
+    }
+    if (provider.remote) throw new RemoteServiceError(name, provider.owner)
+    return provider.instance as T
+  }
+
+  /** 宽松解析：缺失时返回 undefined；但**提供者在独立进程**时同样抛错（不是"缺失"）。 */
+  tryResolve<T>(name: ServiceName): T | undefined {
+    const provider = this.#slots.get(name)?.provider
+    if (provider === undefined) return undefined
+    if (provider.remote) throw new RemoteServiceError(name, provider.owner)
+    return provider.instance as T
+  }
+
+  /**
+   * 供 `ctx.async.useService` 使用：**本地与远程都接受**。
+   *
+   * 远程提供者的 `instance` 是宿主侧的异步代理（方法返回 Promise）。
+   * 调用方必须把它当异步服务用 —— 这件事由 SDK 的类型层表达（`AsyncService<T>`），
+   * 而不是靠运行期约定。
+   */
+  resolveForAsync<T>(name: ServiceName, range?: string): T {
     const provider = this.#slots.get(name)?.provider
     if (provider === undefined) throw new ServiceUnavailableError(name, range)
     if (range !== undefined && range !== '*' && !satisfies(provider.version ?? '', range)) {
@@ -145,17 +183,41 @@ export class ServiceRegistry {
     return provider.instance as T
   }
 
-  /** 宽松解析：缺失或无版本信息时返回 undefined。 */
-  tryResolve<T>(name: ServiceName): T | undefined {
-    return this.#slots.get(name)?.provider?.instance as T | undefined
-  }
-
   /** 非抛出式探测，供加载前的依赖预检使用。 */
   canResolve(name: ServiceName, range?: string): boolean {
     const provider = this.#slots.get(name)?.provider
     if (provider === undefined) return false
     if (range === undefined || range === '*') return true
     return satisfies(provider.version ?? '', range)
+  }
+
+  /**
+   * 某个消费者当前登记了哪些依赖边（服务名）。
+   *
+   * 这是**运行期事实**，用于补充 `plugin.json` 的静态声明：
+   * 插件完全可能通过 `ctx.use` / `ctx.async.useService` 建立清单里没写的依赖（ADR-0019）。
+   */
+  dependenciesOf(consumer: PluginId): readonly ServiceName[] {
+    const names: ServiceName[] = []
+    for (const [name, slot] of this.#slots) {
+      if (slot.consumers.has(consumer)) names.push(name)
+    }
+    return names
+  }
+
+  /**
+   * 查询某服务的提供者信息（不含实例）。
+   *
+   * 供两处使用：`ctx.async.useService` 需要知道"该不该走异步路径"，
+   * 隔离路由需要知道"该把方法调用转给谁"。**不返回实例**是有意的 ——
+   * 让调用方必须明确选择同步还是异步入口，而不是顺手拿到一个可能是远程代理的对象。
+   */
+  providerInfo(
+    name: ServiceName,
+  ): { readonly owner: PluginId; readonly version: string | undefined; readonly remote: boolean } | undefined {
+    const provider = this.#slots.get(name)?.provider
+    if (provider === undefined) return undefined
+    return { owner: provider.owner, version: provider.version, remote: provider.remote }
   }
 
   /** 登记一条依赖边；返回的 Disposable 解除该边。 */
@@ -234,7 +296,12 @@ export class ServiceRegistry {
         provider:
           slot.provider === undefined
             ? undefined
-            : { owner: slot.provider.owner, version: slot.provider.version, generation: slot.generation },
+            : {
+                owner: slot.provider.owner,
+                version: slot.provider.version,
+                generation: slot.generation,
+                remote: slot.provider.remote,
+              },
         consumers,
       })
     }

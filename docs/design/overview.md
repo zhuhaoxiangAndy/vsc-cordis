@@ -109,6 +109,7 @@ idle ──load──► loading ──► active ⇄ paused
 | 副作用回收 | `EffectStack` LIFO（尽力而为：清缓存不强制回收可达闭包） | 同一套 `EffectStack` + 进程退出兜底 |
 | `vscode` API | 受控代理（权限在**调用时刻**校验） | RPC 代理，命令 handler 走**反向调用** |
 | `ctx.async`（显式异步面） | ✅ 同一份签名 | ✅ 同一份签名（ADR-0018） |
+| 服务（`provide`/`use`） | ✅ 活对象 | `provide` ✅（注册为 `remote: true` 的异步代理）；`use` 需走 `ctx.async.useService`（ADR-0019） |
 | 服务 | ✅ | ❌ 明确抛错（服务是进程内对象，跨进程需 IDL） |
 | 无后端时 | — | **拒绝加载**（fail-closed，绝不降级到同进程） |
 

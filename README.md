@@ -35,7 +35,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 161 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 170 项测试 + 构建 + 产物冒烟
 ```
 
 开发时开两个进程：
@@ -104,13 +104,21 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 | 配置读取 | `plugin.json` 声明 `configuration.keys` → 宿主预取快照 + 变化推送，插件侧 `get()` 保持**同步且不陈旧** |
 | 状态栏项 | 本地镜像 + 串行 RPC（读属性同步；未支持的属性**响亮抛错**） |
 | 文档保存事件 | `ctx.async.onDidSaveTextDocument` —— **两种模式签名一致**的显式异步面（正文按需取，见 ADR-0018） |
+| 提供服务 | `ctx.provide` 可用：宿主把**异步代理**注册进自己的注册表（`remote: true`），依赖协调与级联暂停对远程服务一样有效 |
+| 取用服务 | 隔离提供者 → `ctx.async.useService(name)`（方法全异步）；同进程提供者 → **明确拒绝**（活对象过不了进程边界） |
 
-**唯一仍然是 ❌ 的是跨进程服务**（`ctx.use`/`provide`）。它不是"还没做"，而是需要一个
-**方法级 RPC 协议**（方法发现 + 序列化契约 + 调用失败传播 + 提供者退出时的在途调用处理），
-与"转发一个事件"不是一个量级；且没有它并不影响隔离方案成立。需要服务协作的插件用
-`trust: trusted`（ADR-0003 已说明它只防误用、不防恶意）。
+四条规则，没有第五条（ADR-0019）：
+
+| 提供者 | 消费者 | 入口 |
+| --- | --- | --- |
+| 同进程 | 同进程 | `ctx.use`（同步，活对象） |
+| 同进程 | 隔离 | ❌ 明确拒绝，错误信息给出两条出路 |
+| 隔离 | 同进程 / 隔离 | `ctx.async.useService`（异步代理） |
+
+**不存在"用 `ctx.use` 拿到一个方法变成 Promise 的代理"这条路** —— 那正是 ADR-0016 拒绝过的类型撒谎。
+同步入口遇到远程提供者会抛 `RemoteServiceError` 并写明替代路径。
 `net` 权限是**约定**而非强制（Node 没有网络开关）。
-详见 `docs/adr/0016-isolation-capability-tradeoffs.md` 与 `docs/adr/0018-explicit-async-surface.md`。
+详见 `docs/adr/0016`、`0018`、`0019`。
 
 ## CLI（M5）
 

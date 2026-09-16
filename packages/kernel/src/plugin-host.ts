@@ -38,6 +38,15 @@ export interface PluginRecord {
   ctx: PluginContext | undefined
   /** 当前缺失的硬依赖服务名（用于状态展示与恢复判定）。 */
   missing: readonly ServiceName[]
+  /**
+   * 该插件在运行期**实际建立过依赖边**的服务（暂停时快照）。
+   *
+   * 为什么需要它：依赖边会随 EffectStack 一起被回收，所以"暂停之后"再问注册表是问不到的。
+   * 而 `#missingDependencies` 若只看清单声明，一个"用了服务但没在 plugin.json 里声明"的插件
+   * 会被误判成"没有缺失依赖"，于是在提供者仍然缺席时被尝试恢复 → 直接变成 `failed`
+   * （本该老老实实停在 `paused`）。见 ADR-0019。
+   */
+  usedDependencies: readonly ServiceName[]
 }
 
 export interface PluginView {
@@ -168,6 +177,7 @@ export class PluginHost {
         loaded: undefined,
         ctx: undefined,
         missing: [],
+        usedDependencies: [],
       }
       this.#records.set(id, record)
 
@@ -334,6 +344,10 @@ export class PluginHost {
     this.#setState(record, 'unloading', reason)
     record.abort?.abort()
 
+    // 在回收副作用**之前**快照运行期依赖边：回收会把它们一起清掉，
+    // 而 `paused` 之后的恢复判定需要知道"这插件到底依赖过什么"。
+    record.usedDependencies = this.#registry.dependenciesOf(record.entry.manifest.id)
+
     const loaded = record.loaded
     const ctx = record.ctx
     if (loaded !== undefined && ctx !== undefined) {
@@ -470,6 +484,10 @@ export class PluginHost {
 
   #declaredDependencies(record: PluginRecord): Record<string, string> {
     const declared: Record<string, string> = { ...record.entry.manifest.dependencies }
+    // 运行期实际用过的服务也要算进来（清单没写不等于没依赖，见 PluginRecord.usedDependencies）
+    for (const name of record.usedDependencies) {
+      if (declared[name] === undefined) declared[name] = '*'
+    }
     for (const name of record.loaded?.plugin.inject ?? []) {
       if (declared[name] === undefined) declared[name] = '*'
     }

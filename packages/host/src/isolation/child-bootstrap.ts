@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
 import { EffectStack } from '@vscordis/kernel'
-import { resolvePluginExport, type AsyncTextDocument, type CordisPlugin, type Disposable, type LogLevel, type Permission, type PluginContext, type PluginVscodeApi } from '@vscordis/sdk'
+import { resolvePluginExport, type AsyncService, type AsyncTextDocument, type CordisPlugin, type Disposable, type LogLevel, type Permission, type PluginContext, type PluginVscodeApi, type ProvideOptions, type ServiceName } from '@vscordis/sdk'
 import {
   PROTOCOL_VERSION,
   errorToWire,
@@ -40,7 +40,63 @@ const pendingCalls = new Map<number, PendingCall>()
 const commandHandlers = new Map<string, (...args: unknown[]) => unknown>()
 /** 订阅句柄 → 监听器。宿主转发事件时按句柄派发。 */
 const eventListeners = new Map<number, (document: AsyncTextDocument) => void>()
+/**
+ * 本进程**提供**的服务：名称 → 实例。
+ *
+ * 方法调用由宿主反向请求进来（`invokeService`），在这里对真实对象求值 ——
+ * 与命令 handler 走的是同一套"函数不跨进程，只跨调用"的思路（ADR-0019）。
+ */
+const localServices = new Map<string, unknown>()
 let callSeq = 0
+
+/** 列出服务的方法名。这份"IDL-lite"让消费者的代理能对**不存在的方法**响亮报错。 */
+function listMethods(service: unknown): string[] {
+  if (service === null || (typeof service !== 'object' && typeof service !== 'function')) return []
+  const record = service as Record<string, unknown>
+  const names = new Set<string>()
+  for (const key of Object.getOwnPropertyNames(record)) {
+    if (typeof record[key] === 'function') names.add(key)
+  }
+  let proto: object | null = Object.getPrototypeOf(record) as object | null
+  while (proto !== null && proto !== Object.prototype) {
+    for (const key of Object.getOwnPropertyNames(proto)) {
+      if (key === 'constructor') continue
+      if (typeof record[key] === 'function') names.add(key)
+    }
+    proto = Object.getPrototypeOf(proto) as object | null
+  }
+  return [...names]
+}
+
+/**
+ * 远程服务的消费者代理：每个方法 → 一次跨进程调用。
+ *
+ * 只暴露**方法表里声明过**的名字。少了这一步，代理就得对任何属性都返回一个函数，
+ * 于是 `clock.nwo()` 这种打字错误会变成一个"调用了一个不存在的方法"的跨进程往返，
+ * 而不是立刻报错。
+ */
+function createRemoteServiceProxy<T>(service: string, methods: readonly string[]): AsyncService<T> {
+  const allowed = new Set(methods)
+  return new Proxy(
+    {},
+    {
+      get(_target, property) {
+        if (typeof property !== 'string') return undefined
+        // ⚠️ `then` 必须放行成 undefined：`await proxy` 会去探测 `.then` 判断它是不是 thenable，
+        // 而我们的代理对方法表外的属性是抛错的 —— 不特判的话，
+        // `await ctx.async.useService('clock')` 会炸在 `then` 上（"没有方法 then"）。
+        if (property === 'then') return undefined
+        if (!allowed.has(property)) {
+          throw new Error(
+            `远程服务 "${service}" 没有方法 "${property}"。` +
+              `提供者声明的方法：${methods.length === 0 ? '<无>' : methods.join(', ')}`,
+          )
+        }
+        return (...args: unknown[]): Promise<unknown> => callHost('services.invoke', [service, property, args])
+      },
+    },
+  ) as AsyncService<T>
+}
 
 function send(message: ChildToHost): void {
   // process.send 只在 fork 出来的子进程里存在
@@ -577,6 +633,12 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
           void callHost('events.unsubscribe', [opened.subscription]).catch(() => undefined)
         })
       },
+      useService: async <T,>(name: string): Promise<AsyncService<T>> => {
+        // 先让宿主在**它的**注册表里登记依赖边（这样提供者离开时本插件会被 paused），
+        // 并取回方法表 —— 没有方法表，代理无法区分方法与数据字段。
+        const info = (await callHost('services.use', [name])) as { methods: readonly string[] }
+        return createRemoteServiceProxy<T>(name, info.methods)
+      },
     },
 
     effect: (register, dispose, label) => stack.effect(register, dispose, label),
@@ -584,10 +646,28 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
     scope: (label?: string) => buildContext(activation, stack.scope(label)),
     effects: stack,
 
-    use: () => notSupported('services'),
-    tryUse: () => notSupported('services'),
-    provide: () => notSupported('services'),
-    graph: () => notSupported('services'),
+    use: () => notSupported('services.syncConsumer'),
+    tryUse: () => notSupported('services.syncConsumer'),
+    provide: <T,>(name: ServiceName, service: T, options?: ProvideOptions): Disposable => {
+      // 方法表就是这份"IDL-lite"：没有它，消费者的代理无法区分方法与数据字段，
+      // 只能对任何属性都返回一个函数 —— 那会把打字错误变成"调用了一个不存在的方法"。
+      const methods = listMethods(service)
+      trackHostCall(
+        callHost('services.provide', [name, options?.version ?? null, methods]),
+        `提供服务 ${name}`,
+      )
+      localServices.set(name, service)
+      const disposable = new LocalDisposable(() => {
+        localServices.delete(name)
+        void callHost('services.revoke', [name]).catch(() => undefined)
+      })
+      // ⚠️ 必须与同进程实现保持一致：`ctx.provide` 自动登记到 EffectStack。
+      // 少了这一步，**优雅停用**时子进程不会发出 revoke，宿主只能在 exit 事件里兜底清理 ——
+      // 那样"提供者卸载 → 消费者 paused"的级联就会晚一步、甚至被 settle() 抢先观察到。
+      stack.add(() => disposable.dispose(), `provide:${name}`)
+      return disposable
+    },
+    graph: () => notSupported('services.graph'),
     onDispose: (teardown, label) => stack.add(teardown, label),
   }
 
@@ -660,6 +740,37 @@ async function deactivate(): Promise<void> {
 
 // ————————————————————————————————— 消息循环
 
+/** 宿主反向请求：在**本进程里**对本地服务对象求值，并把结果回传。 */
+function invokeLocalService(message: Extract<HostToChild, { kind: 'invokeService' }>): void {
+  const instance = localServices.get(message.service)
+  if (instance === undefined) {
+    send({
+      kind: 'serviceResult',
+      requestId: message.requestId,
+      ok: false,
+      error: `本进程不提供名为 "${message.service}" 的服务（可能已被撤销）`,
+    })
+    return
+  }
+  const candidate = (instance as Record<string, unknown>)[message.method]
+  if (typeof candidate !== 'function') {
+    send({
+      kind: 'serviceResult',
+      requestId: message.requestId,
+      ok: false,
+      error: `服务 "${message.service}" 没有方法 "${message.method}"`,
+    })
+    return
+  }
+  void Promise.resolve()
+    .then(() => (candidate as (...args: unknown[]) => unknown).apply(instance, [...message.args]))
+    .then(
+      (value) => send({ kind: 'serviceResult', requestId: message.requestId, ok: true, value }),
+      (error: unknown) =>
+        send({ kind: 'serviceResult', requestId: message.requestId, ok: false, error: errorToWire(error) }),
+    )
+}
+
 function invokeCommand(requestId: number, command: string, args: readonly unknown[]): void {
   const handler = commandHandlers.get(command)
   if (handler === undefined) {
@@ -707,6 +818,9 @@ process.on('message', (raw: unknown) => {
       })
       break
     }
+    case 'invokeService':
+      invokeLocalService(message)
+      break
     case 'invoke':
       invokeCommand(message.requestId, message.command, message.args)
       break

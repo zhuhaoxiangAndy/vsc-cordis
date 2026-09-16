@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
-import { PluginHost, describe, type PluginEntry, type PluginView } from '@vscordis/kernel'
+import { PluginHost, ServiceRegistry, describe, type PluginEntry, type PluginView } from '@vscordis/kernel'
 import { isPermission, type Permission } from '@vscordis/sdk'
 import { VscodeBridge, type ModuleLoader } from './bridge.ts'
 import { discoverPlugins, expandRootVariables, sortByDependencies, type PluginRoot } from './discovery.ts'
@@ -66,7 +66,16 @@ export class Runtime {
     this.#workerPath = path.join(options.extensionUri.fsPath, 'dist', 'isolated-worker.cjs')
     this.#supportsIsolation = options.supportsIsolation ?? existsSync(this.#workerPath)
 
+    // 注册表在这里显式创建：隔离加载器需要往**同一张**注册表里注册远程服务，
+    // 否则"提供者在隔离进程、消费者在同进程"这种组合根本连不上（ADR-0019）。
+    const registry = new ServiceRegistry({
+      onListenerError: (error) => {
+        this.bridge.log('error', '服务注册表监听器抛错', { error: describe(error) })
+      },
+    })
+
     const isolatedLoader = new IsolatedPluginLoader({
+      registry,
       hostApi: new VscodeHostApi({        isPluginCommand: (command) => this.bridge.livePluginCommands().some((info) => info.command === command),
         // 权限只能由宿主查清单得出：让子进程自述等于允许它给自己提权。
         permissionsOf: (id) => {
@@ -106,6 +115,7 @@ export class Runtime {
     })
     this.host = new PluginHost({
       port: this.bridge,
+      registry,
       disposeTimeoutMs: readDisposeTimeoutMs(),
       activationTimeoutMs: readActivationTimeoutMs(),
       onTransition: (event) => {
