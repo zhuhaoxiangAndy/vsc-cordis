@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.check.json",
     "build": "node scripts/build.mjs",
     "build:prod": "node scripts/build.mjs --production",
+    "watch": "node scripts/watch.mjs",
     "smoke": "node scripts/smoke-built-plugins.mjs",
     "verify": "npm run typecheck && npm run test && npm run build && npm run smoke"
   },

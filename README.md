@@ -9,8 +9,7 @@
 - **不修改 VSCode 源码，不使用非公开 API。** 宿主本身是一个普通 VSCode 扩展。
 
 ```
-* 当前进度：里程碑 1（PoC）与里程碑 2（依赖注入协调）已完成并通过自动化验证。
-* 里程碑 3（文件监听热重载）、4（安全沙箱）、5（CLI）尚未开始 —— 见 docs/acceptance-m1-m2.md 的未覆盖清单。
+进度：M1（PoC）✅   M2（依赖协调）✅   M3（热重载）✅   M4（安全沙箱）⏳   M5（CLI）⏳
 ```
 
 ## 目录
@@ -19,20 +18,29 @@
 | --- | --- | --- |
 | `packages/sdk` | `@vscordis/sdk` | **契约层**：`PluginContext` / `CordisPlugin` / `plugin.json` / 权限 / 受控 API 类型。零运行时依赖。 |
 | `packages/kernel` | `@vscordis/kernel` | **实现层**：`EffectStack` / `ServiceRegistry` / `PluginHost` / 状态机。零 `vscode`、零 Node 依赖。 |
-| `packages/host` | `vscordis` | **唯一发布单元**：VSCode 扩展。把真实 API 桥接成受控面，负责加载/卸载/依赖协调。 |
+| `packages/host` | `vscordis` | **唯一发布单元**：VSCode 扩展。把真实 API 桥接成受控面，负责加载/卸载/依赖协调/热重载。 |
 | `plugins/*` | — | 示例插件（esbuild 打成单文件 CJS）。 |
 | `docs/adr` | — | 架构决策记录，每条含权衡与否决方案。 |
-| `docs/acceptance-m1-m2.md` | — | M1/M2 的手动验收步骤与未覆盖范围。 |
+| `docs/acceptance-*.md` | — | 手动验收步骤、时延预算与未覆盖范围。 |
 
 ## 快速开始
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 59 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 69 项测试 + 构建 + 产物冒烟
 ```
 
-在 VSCode 中打开本仓库，按 **F5**（`运行 vscordis 扩展（M1/M2 手动验收）`），
-然后 `Ctrl+Shift+P` 输入 `VSCordis`。完整验收步骤见 `docs/acceptance-m1-m2.md`。
+开发时开两个进程：
+
+```bash
+pnpm run watch                     # 终端 A：esbuild 监听插件源码 → 增量重建
+# 终端 B / VSCode：按 F5 启动扩展开发宿主
+```
+
+改 `plugins/*/src/**` 保存后，宿主会在 **~250ms** 内自动卸载并重载该插件
+（时延预算分解与实测方法见 `docs/acceptance-m3.md`）。
+
+`Ctrl+Shift+P` 输入 `VSCordis` 可见 6 个入口命令。
 
 ## 能力矩阵（诚实版）
 
@@ -40,9 +48,10 @@ pnpm run verify                    # 类型检查 + 59 项测试 + 构建 + 产�
 | --- | --- | --- |
 | 同进程受控 API 插件 | ✅ | ✅ |
 | 运行期加载磁盘上的插件 | ✅ | ❌ 浏览器无法运行期加载代码，仅支持**构建期内置**插件 |
-| 子进程隔离（untrusted） | ⏳ M4 | ❌ 直接拒绝加载（fail-closed） |
-| 文件监听自动热重载 | ⏳ M3 | 不适用 |
+| 文件监听自动热重载 | ✅（`npm run watch` + `vscordis.hotReload`） | 不适用 |
 | 手动 reload（拿到新模块实例） | ✅ | ✅（内置插件重新取工厂产物） |
+| 子进程隔离（untrusted） | ⏳ M4 | ❌ 直接拒绝加载（fail-closed） |
+| 签名与哈希校验 | ⏳ M4 | ⏳ M4 |
 
 ## 已知硬限制（均有 ADR 与一手证据）
 
@@ -53,8 +62,11 @@ pnpm run verify                    # 类型检查 + 59 项测试 + 构建 + 产�
    `trust: trusted` 的插件在安全上**只防误用、不防恶意**；真正的边界是子进程。详见 `docs/adr/0003`。
 3. **Node 权限模型没有网络开关**：`--permission` 可限制 `fs`/`child-process`/`worker`/`addons`，
    但**无法限制 `net`**，网络只能靠 require 拦截 + 审计（M4）。详见 `docs/adr/0005`。
-4. **VSCode 官方不支持运行期卸载单个扩展**，因此本项目的卸载粒度是「扩展内部的插件」，不是扩展本身。
-5. **Web 端无法运行期加载代码**，且 Web 扩展宿主里 `require` 不可用（入口必须为 ESM）。详见 `docs/adr/0006` 与 `0010`。
+4. **VSCode 官方不支持运行期卸载单个扩展**，因此卸载粒度是「扩展内部的插件」，不是扩展本身；
+   宿主自身（`packages/host/**`）的改动也无法热重载，需要重载窗口。
+5. **Web 端无法运行期加载代码**，且 Web 扩展宿主里 `require` 不可用（入口必须为 ESM）。详见 `docs/adr/0006`、`0010`。
+6. **热重载失败不回滚**：新版本 `activate` 失败时插件进入 `failed` 并弹出警告，不会自动退回旧版本
+   （回滚需要旧版本与旧状态同时保活，会让"无残留"无法断言）。详见 `docs/adr/0011`。
 
 ## 从 Cordis 继承了什么、刻意分歧了什么
 
@@ -64,12 +76,13 @@ pnpm run verify                    # 类型检查 + 59 项测试 + 构建 + 产�
 | fiber 顶层 disposer 逆序启动 + `Promise.all` 并发 | **严格 LIFO + 串行 `await`** | 并发回收会让"先释放 A、再释放依赖 A 的 B"退化成竞态 |
 | `ctx.inject(deps, cb)` 细粒度重入 | 插件级 `paused`/`active` | VSCode 的命令表是全局的，细粒度重入会让命令"闪现"（ADR-0007） |
 | 同名 service 在同一 isolate 内重复即抛错 | 默认 `exclusive`，可显式 `last-wins` | 与 cordis 一致，并补上显式接管路径 |
-| `ctx.set` 要求同一 fiber 已 provide | 合并为 `ctx.provide` | 减少概念数量；两者差异在 VSCode 场景下没有实际收益 |
+| `ctx.set` 要求同一 fiber 已 provide | 合并为 `ctx.provide` | 减少概念数量；两者差异在本场景没有实际收益 |
 
 ## 开发约定
 
 - 测试用 **Node 内置 `node:test`** + 原生类型剥离，零测试框架依赖、无网络也可跑（ADR-0009）。
 - 因为类型剥离不支持不可擦除语法，代码里禁用 `enum` / `namespace` / 构造函数参数属性 / 装饰器；
   相对导入必须带 `.ts` 扩展名；跨包引用只能是 `import type`（由 `verbatimModuleSyntax` 强制）。
+- 插件产物必须是**单文件 CJS**，且构建期禁止 `import 'vscode'`（`scripts/build.mjs` 的 `forbid-vscode`）。
 - `scripts/*.ps1` 必须保持 **ASCII-only**：PowerShell 5.1 会按 ANSI 代码页解码无 BOM 的 `.ps1`，
   中文会把后面的引号字节吞掉。中文提交信息走 `scripts/commit-messages/*.txt` + `git commit -F`。

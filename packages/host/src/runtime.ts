@@ -1,9 +1,11 @@
+import { existsSync } from 'node:fs'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { PluginHost, describe, type PluginEntry, type PluginView } from '@vscordis/kernel'
 import { VscodeBridge } from './bridge.ts'
 import { discoverPlugins, expandRootVariables, sortByDependencies, type PluginRoot } from './discovery.ts'
 import { NodeModuleLoader } from './loader-node.ts'
+import { PluginWatcher, type ReloadPlan } from './watcher.ts'
 
 export interface RuntimeOptions {
   readonly output: vscode.LogOutputChannel
@@ -22,6 +24,11 @@ export class Runtime {
   readonly bridge: VscodeBridge
   readonly host: PluginHost
   readonly #globalStorageUri: vscode.Uri
+  readonly #watcher: PluginWatcher
+  /** 规范化目录 → 插件 id。热重载要靠目录反查 id；目录被删除时也靠它决定卸载谁。 */
+  readonly #dirToId = new Map<string, string>()
+  #lastReloadMs = 0
+  #lastReloadAt: Date | undefined
   #entries: readonly PluginEntry[] = []
   #problems: readonly string[] = []
 
@@ -43,6 +50,18 @@ export class Runtime {
       disposeTimeoutMs: readDisposeTimeoutMs(),
       onTransition: (event) => {
         this.bridge.log('debug', `[状态] ${event.id}: ${event.from} → ${event.to}（${event.reason}）`)
+      },
+    })
+
+    this.#watcher = new PluginWatcher({
+      roots: () => this.#pluginRoots().map((root) => root.dir),
+      debounceMs: readHotReloadDebounceMs(),
+      onPlan: (plan) => {
+        void this.#handleReloadPlan(plan)
+      },
+      onError: (error) => {
+        // 插件根不存在 / 不可递归监听都只记日志：不该让热重载整体失效。
+        this.bridge.log('debug', `[热重载] 监听告警：${describe(error)}`)
       },
     })
   }
@@ -75,7 +94,79 @@ export class Runtime {
     const result = await discoverPlugins(this.#pluginRoots())
     this.#entries = sortByDependencies(result.entries)
     this.#problems = result.problems
+    for (const entry of this.#entries) this.#dirToId.set(normalizeDir(entry.root), entry.manifest.id)
     for (const problem of result.problems) this.bridge.log('warn', `[发现] ${problem}`)
+  }
+
+  /**
+   * 处理一次文件变化计划（ADR-0011）。
+   *
+   * 顺序有意固定：**先重新扫描，再决定重载谁** —— 清单可能改了 id 或依赖，
+   * 只按变更前认识的插件去 reload 会得到与清单不一致的状态。
+   */
+  async #handleReloadPlan(plan: ReloadPlan): Promise<void> {
+    const started = Date.now()
+
+    if (plan.rediscover) await this.#refreshEntries()
+
+    const byDir = new Map(this.#entries.map((entry) => [normalizeDir(entry.root), entry]))
+    const targets: PluginEntry[] = []
+    const removed: string[] = []
+
+    for (const dir of plan.changedDirs) {
+      const entry = byDir.get(normalizeDir(dir))
+      if (entry !== undefined) {
+        targets.push(entry)
+        continue
+      }
+      // 目录已消失 → 卸载它此前对应的插件。保守起见只在"目录确实不存在"时才这么做，
+      // 避免一次瞬时 IO 失败把全部插件卸掉。
+      const id = this.#dirToId.get(normalizeDir(dir))
+      if (id !== undefined && !existsSync(dir)) removed.push(id)
+    }
+
+    for (const id of removed) {
+      await this.host.unload(id)
+      this.bridge.log('info', `[热重载] 插件目录已删除，已卸载 ${id}`)
+    }
+
+    for (const entry of targets) {
+      const id = entry.manifest.id
+      try {
+        if (this.host.view(id) === undefined) await this.host.load(entry)
+        else await this.host.reload(id)
+        await this.host.settle()
+        this.bridge.log('info', `[热重载] ${id} → ${this.host.view(id)?.state ?? 'gone'}`)
+      } catch (error) {
+        // 失败可见、不回滚、不自动重试（ADR-0011 决策 5）：
+        // 自动回滚需要旧版本与旧状态同时保活，会让"无残留"这条不变式无法断言。
+        this.bridge.log('error', `[热重载] ${id} 失败：${describe(error)}`)
+        void vscode.window.showWarningMessage(
+          `VSCordis: 热重载 ${id} 失败，插件已进入 failed 状态（不会自动回滚到旧版本）：${describe(error)}`,
+        )
+      }
+    }
+
+    if (targets.length > 0 || removed.length > 0) {
+      this.#lastReloadMs = Date.now() - started
+      this.#lastReloadAt = new Date()
+      this.bridge.log(
+        'info',
+        `[热重载] 本次耗时 ${this.#lastReloadMs}ms（重载 ${targets.length} 个，卸载 ${removed.length} 个）`,
+      )
+    }
+  }
+
+  #startWatching(): void {
+    if (!vscode.workspace.getConfiguration('vscordis').get<boolean>('hotReload', true)) {
+      this.bridge.log('info', '热重载已关闭（vscordis.hotReload = false）')
+      return
+    }
+    this.#watcher.refresh()
+    this.bridge.log(
+      'info',
+      `热重载已开启：监听 ${this.#watcher.active} 个插件根，防抖 ${readHotReloadDebounceMs()}ms（改动后请在输出通道核对耗时）`,
+    )
   }
 
   entries(): readonly PluginEntry[] {
@@ -88,19 +179,24 @@ export class Runtime {
 
   async initialize(): Promise<void> {
     await this.#refreshEntries()
-    if (!vscode.workspace.getConfiguration('vscordis').get<boolean>('autoLoad', true)) {
+
+    const autoLoad = vscode.workspace.getConfiguration('vscordis').get<boolean>('autoLoad', true)
+    if (!autoLoad) {
       this.bridge.log('info', `自动加载已关闭；已发现 ${this.#entries.length} 个插件，等待手动加载`)
-      return
-    }
-    for (const entry of this.#entries) {
-      try {
-        await this.host.load(entry)
-      } catch (error) {
-        // 单个插件加载失败绝不能影响其它插件，也不能中断宿主启动。
-        this.bridge.log('error', `插件 ${entry.manifest.id} 加载失败：${describe(error)}`)
+    } else {
+      for (const entry of this.#entries) {
+        try {
+          await this.host.load(entry)
+        } catch (error) {
+          // 单个插件加载失败绝不能影响其它插件，也不能中断宿主启动。
+          this.bridge.log('error', `插件 ${entry.manifest.id} 加载失败：${describe(error)}`)
+        }
       }
+      await this.host.settle()
     }
-    await this.host.settle()
+
+    // 即使关掉自动加载，热重载也要开：手动加载过的插件同样应该享受改动即生效。
+    this.#startWatching()
     this.bridge.log('info', `启动完成：${this.host.list().length} 个插件，${this.bridge.livePluginCommands().length} 个命令`)
   }
 
@@ -204,6 +300,12 @@ export class Runtime {
     const lines: string[] = []
     lines.push(`VSCordis 运行时状态（${new Date().toISOString()}）`)
     lines.push(`平台：node · 隔离后端：${this.bridge.supportsIsolation ? '可用' : '不可用（untrusted 插件会被拒绝）'}`)
+    const hotReload = vscode.workspace.getConfiguration('vscordis').get<boolean>('hotReload', true)
+    const lastReload =
+      this.#lastReloadAt === undefined
+        ? '尚未发生'
+        : `${this.#lastReloadMs}ms @ ${this.#lastReloadAt.toISOString()}`
+    lines.push(`热重载：${hotReload ? `开启（监听 ${this.#watcher.active} 个插件根）` : '关闭'} · 上次重载 ${lastReload}`)
 
     const views = this.host.list()
     lines.push('')
@@ -266,8 +368,20 @@ export class Runtime {
   }
 
   async dispose(): Promise<void> {
+    this.#watcher.dispose()
     await this.host.dispose()
   }
+}
+
+/** 目录比较用的规范化键：Windows 下大小写不敏感。 */
+function normalizeDir(dir: string): string {
+  const resolved = path.resolve(dir)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function readHotReloadDebounceMs(): number {
+  const configured = vscode.workspace.getConfiguration('vscordis').get<number>('hotReloadDebounceMs', 150)
+  return Number.isFinite(configured) && configured >= 0 ? configured : 150
 }
 
 function statusIcon(view: PluginView): string {

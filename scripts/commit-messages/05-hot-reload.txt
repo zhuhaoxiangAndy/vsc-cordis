@@ -1,0 +1,32 @@
+feat(host): M3 文件监听热重载
+
+新增
+- packages/host/src/watcher.ts：热重载的文件侧。核心是**无 IO 的纯函数** planReload
+  （变更路径 → 该重载哪些插件目录 + 是否需要重扫），PluginWatcher 只是 fs.watch 适配层。
+  两条细则：plugin.json 变更必须升级为"重新扫描"（id/依赖/权限都可能变）；
+  无法定位的变化（filename === null）也升级为重扫 —— 宁可多扫一次，不要漏一次变更。
+- scripts/watch.mjs：esbuild --watch 增量重建插件产物，与上面的 watcher 组成完整链路。
+  刻意不把 esbuild 塞进宿主进程：编译是开发期动作，作为运行时依赖会平白增加发布体积。
+- docs/adr/0011-hot-reload.md：热重载的边界与失败语义。
+- docs/acceptance-m3.md：手动验收步骤、时延预算表（防抖 150ms + esbuild 50-150ms + 重载 10-50ms）。
+- runtime.ts：接入 watcher，新增 #handleReloadPlan（先重扫再重载）、
+  #startWatching、重载耗时统计，并在状态面板显示"上次重载 Nms @ 时间"。
+
+决策
+- 热重载失败**可见且不回滚**：回滚需要旧版本模块与旧状态同时保活（双份加载），
+  会让"卸载后无残留"这条核心不变式变得无法断言。因此只回滚副作用 + 标记 failed + 弹警告。
+- 删除插件目录 → 卸载该插件；但只在"目录确实不存在"时才这么做，
+  避免一次瞬时 IO 失败把所有插件卸掉。
+- 用 fs.watch({recursive:true, persistent:false}) 而不是 VSCode 的 FileSystemWatcher：
+  插件根可能位于工作区之外的 globalStorage，且 watch 是"提示"而非判据，重复事件最多多一次重载。
+
+顺手清掉一个陷阱
+- 移除配置项 vscordis.unloadBeforeReload：它从未被任何代码读取，
+  与之前 CordisPlugin.inject 的空字段属于同一类问题（声明了但不生效且不报错）。
+
+验证
+- typecheck 0 错误。
+- 69 项测试全绿（新增 10 项：8 项 planReload 边界 + 2 项真实 fs.watch 集成，
+  后者验证"重写 dist 产物 → 触发计划 → 重载拿到新模块实例"以及 dispose 后不再产生幽灵重载）。
+- 诚实声明：真实 VSCode 中的端到端时延未测量（用户决策不跑 e2e），
+  测量方法与预算分解写在 docs/acceptance-m3.md。
