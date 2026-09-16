@@ -84,9 +84,25 @@ export class PluginIntegrityCheckError extends Error {
 
 export class IsolatedPluginLoader {
   readonly #options: IsolatedLoaderOptions
+  /**
+   * 活跃的隔离会话（pluginId → session）。
+   *
+   * 它是**泄漏诊断**的关键：子进程是否真的退出了，光看日志不可靠。
+   * 有了它，浸泡测试可以直接断言 `activeSessions === 0`，
+   * 状态面板也能显示"当前有几个子进程"，而不必去猜。
+   */
+  readonly #sessions = new Map<string, IsolatedSession>()
 
   constructor(options: IsolatedLoaderOptions) {
     this.#options = options
+  }
+
+  get activeSessions(): number {
+    return this.#sessions.size
+  }
+
+  activeSessionIds(): readonly string[] {
+    return [...this.#sessions.keys()]
   }
 
   async load(entry: PluginEntry): Promise<LoadedPluginModule> {
@@ -127,6 +143,11 @@ export class IsolatedPluginLoader {
           log: (message) => this.#log(message),
         })
         ref.session = session
+        // 记账：子进程退出（无论是优雅停用还是被 kill）就把它从活跃表里摘掉。
+        this.#sessions.set(pluginId, session)
+        void session.waitForExit().then(() => {
+          if (this.#sessions.get(pluginId) === session) this.#sessions.delete(pluginId)
+        })
         try {
           await session.start()
         } catch (error) {

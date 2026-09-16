@@ -1,0 +1,36 @@
+fix(kernel): 活性保护（activate 超时）与"无残留"的结构性证据
+
+修掉的活性缺陷（严重）
+- PluginHost 的 `await loaded.plugin.activate(ctx)` **没有超时**。所有生命周期操作共用一条
+  串行队列，一个永不 resolve 的 activate 会把队列永久卡住 —— 连"卸载这个插件"本身都排在后面，
+  宿主再也回不来，用户唯一出路是重载窗口。这不是性能问题，是**宿主失去响应**。
+  现在：默认 15s 上限（vscordis.activationTimeoutMs），超时后**先发 AbortSignal 再回滚**。
+  先 abort 的理由：回滚只清宿主侧状态，插件侧那个还在跑的异步任务必须被叫停，
+  否则"卸载完成"是假的；而信号是我们唯一能用的手段（无法强制终止同进程里的 Promise）。
+
+修掉的未处理 rejection
+- PluginHost.#handleServiceChange 与 Runtime 的 onPlan 都用了 `void promise`。
+  `void` 只丢弃返回值、不处理拒绝：一旦抛出就是"日志里一条警告 + 功能静默失效"。
+  两处都改成显式 .catch() 并记日志。
+
+新增的"无残留"证据（126 项测试全绿）
+- kernel 浸泡：200 轮「加载 3 个插件（A→B→C 依赖链）→ 全部卸载」，
+  **每轮**断言插件记录为空 / registry.size === 0 / 命令表为空 /
+  该轮每个 incarnation 的副作用栈 closed && size === 0 / 模块释放数 = 轮数 × 3。
+  每轮都查而不是收尾查一次：级联路径最容易留残影，只查一次会被后续轮次掩盖。
+- kernel reload 浸泡：50 次重载得到 51 个**互不相同**的模块实例
+  （require.cache 没清干净时 incarnation 会重复）。
+- 隔离浸泡：20 轮起停**真实子进程**，activeSessions 归零，每轮反向调用都拿到 pong。
+- 内存只做**趋势观察**（宽松上界 60MB + 打印实测值）。理由写进 ADR-0015：
+  结构断言是确定性的，而没做 GC 的堆数据在几 MB 到几十 MB 之间随机漂移，不足以断言泄漏。
+  实测：200 轮 × 3 插件后 heapUsed 增长约 6–7 MB。
+
+顺带
+- IsolatedPluginLoader 新增 activeSessions / activeSessionIds 诊断，并接进
+  `vscordis: 显示运行时状态`：诊断能力不该只活在测试里，用户需要能自己判断"卸载到底生效没有"。
+- 新增 vscordis.activationTimeoutMs 配置项。
+
+已知缺口（写入 ADR-0015）
+- EffectStack.dispose() 的总时长仍是 N × 单个超时（有界，但 50 个都超时就是 100 秒）。
+- 内存断言要靠 --expose-gc + 堆快照才能严格证明，扩展宿主里不易开。
+- 超时后插件侧异步工作是否真停，取决于它是否尊重 ctx.signal（我们只能发信号）。
