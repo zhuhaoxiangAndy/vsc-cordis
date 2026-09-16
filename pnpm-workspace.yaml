@@ -6,5 +6,7 @@ packages:
 # pnpm 11 使用的键是 allowBuilds（映射形式），并会把它自动写入本文件。
 # 这里只放行 esbuild（需要执行安装脚本落地平台二进制），不使用全放开开关。
 allowBuilds:
-  '@vscode/vsce-sign': set this to true or false
+  # @vscode/vsce-sign 的 postinstall 只落地「vsce sign」用的平台二进制（本地复制，失败则走 HTTPS 下载）。
+  # 本项目只用 `vsce package` 打包（不签名），故显式拒绝，保持零网络可验证（ADR-0009）。
+  '@vscode/vsce-sign': false
   esbuild: true

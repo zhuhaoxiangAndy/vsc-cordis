@@ -22,6 +22,16 @@
    - `verbatimModuleSyntax: true` 强制显式 `import type`，把这条纪律交给编译器看守。
 4. 模块系统：内核与 SDK 声明 `"type": "module"`；宿主扩展产物固定为 `dist/extension.cjs`
    （VSCode 加载 CJS 最稳），由 esbuild 直接决定产物格式，不依赖包的 `type` 字段。
+5. **pnpm 供应链保护（`allowBuilds`）用显式清单，不留未决项**：只放行 `esbuild`
+   （需要执行安装脚本落地平台二进制），对 `@vscode/vsce-sign` 显式写 `false`
+   （它的 `postinstall` 会从平台包复制、失败则 HTTPS 下载「vsce sign」用的二进制；
+   而本仓库只用 `vsce package` 打包、不签名）。显式拒绝同时避免了隐式网络下载。
+   - 取证：pnpm 11.6 会把新发现的被拦截依赖写成占位文本 `set this to true or false`；
+     pnpm **11.7.0 起**该未决值直接让 `pnpm install` 退出 1
+     （`ERR_PNPM_IGNORED_BUILDS`），并连带使 `pnpm run <script>`（内部做依赖状态检查）
+     全部不可运行 —— 即"基线验证命令本身跑不起来"。
+   - 这是"零网络可验证"的一部分：任何隐式下载都会让无网环境失败，所以策略必须是
+     "显式放行需要的、显式拒绝其余"，而不是"交给默认值"。
 
 ## 后果
 
