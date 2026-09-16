@@ -1,0 +1,59 @@
+feat(host): M4b 子进程隔离后端（untrusted 插件真正可用）
+
+新增
+- packages/host/src/isolation/protocol.ts：宿主↔子进程线协议。三条约束决定形状：
+  传不过去函数（命令 handler 留在子进程，走反向调用 invoke→result）、
+  传不过去类实例（Uri/WorkspaceFolder/OutputChannel 降级为纯数据或整数句柄）、
+  错误只传字符串。
+- packages/host/src/isolation/permissions.ts：权限 → execArgv 映射，并如实区分强度：
+  fs:read/write 与 process:spawn 由 Node 权限模型**强制**；
+  net **没有**开关，只能在子进程里拦 require（防误用），且必须回显降级警告。
+- packages/host/src/isolation/child-bootstrap.ts：子进程引导脚本。用**同一套 kernel EffectStack**
+  做 LIFO 回收；ctx.vscode 是 RPC 代理；本地 shim 了 Uri/Disposable/EventEmitter；
+  额外拦截 net/child_process 的 require。
+- packages/host/src/isolation/isolated-loader.ts：宿主侧加载器。校验在 fork 之前；
+  子进程寿命 = 宿主侧一项 effect（ctx.effect(() => session, s => s.kill())）；
+  子进程一死就撤销所有宿主侧注册。
+- packages/host/src/isolation/vscode-host-api.ts：IsolatedHostApi 的真实 VSCode 实现。
+  输出通道**句柄化**（堵死"猜一个数字写进别人通道"）；执行命令的白名单在宿主侧判定。
+- plugins/isolated-hello：trust: untrusted 的示例插件（F5 演示用）。
+- scripts/build.mjs：新增 dist/isolated-worker.cjs 构建目标（不 external vscode —— 一旦误引即构建失败）。
+- docs/adr/0013-isolation-backend.md、docs/acceptance-m4b.md。
+
+关键决策
+- 隔离层**不 import vscode**，宿主能力靠 IsolatedHostApi 注入。这不是洁癖：
+  正因如此整条链路（真实子进程 + 真实 IPC + 真实 --permission）可以 node --test 端到端验证，
+  而桥接层之所以只能手动验收，恰恰因为它绕不开真实 vscode 模块。
+- 隔离层路由放在 Runtime 的组合 loader 里，bridge.ts 一行未改。
+- 隔离插件不参与服务依赖（服务是进程内对象，跨进程共享需完整 IDL）—— 明确抛错并指向 M4c，
+  而不是给"类型同步、实际异步"的假接口。
+
+实测中抓到并修掉的真实缺陷
+- **registerCommand 是 fire-and-forget**：它必须同步返回 Disposable，于是宿主侧的
+  PermissionDeniedError 只被子进程记进日志 —— 插件显示"激活成功"，命令却是死的。
+  这是最难查的一类问题。现在两道保险：本地按握手权限同步快速失败 + **激活屏障**
+  （等所有未完成宿主调用结算，任一失败即让激活失败）。宿主判定始终是权威的。
+- Session.alive 用 exitCode === null 判断存活是错的：被信号杀掉时 exitCode 仍是 null，
+  signalCode 才有值。已修。
+- 子进程里 new Set(permissionsObject) 会抛 "object is not iterable"，且那是类型谎言。已改为
+  从结构化权限还原权限名单。
+- VscodeHostApi.executeCommand 最初用了一个返回空集合的权限查询，导致
+  vscode:commands.execute.any 形同虚设。已改为由宿主查插件清单。
+
+验证（全部 node --test 自动化，10 项）
+- 注册命令 → 宿主执行 → 反向调用子进程 handler → 结果回传 ✅
+- 卸载后子进程退出且宿主侧命令被撤销（M1 验收标准的隔离版）✅
+- 子进程 require('vscode') 失败 ✅（实测得到的是 "Access to this API has been restricted"，
+  连模块解析都被权限模型挡住，比预期更严）
+- 子进程读插件目录外的文件 → ERR_ACCESS_DENIED ✅（**强制隔离的直接证据**）
+- 未授权注册命令 → 激活失败且宿主侧零残留 ✅
+- 不支持的能力 → 抛错并指向 M4c ✅
+- 未授权 require('node:net') → 被拦截并如实标注"防误用" ✅
+- 累计 93 项测试全绿；typecheck 0 错误；4 个插件产物冒烟通过。
+
+诚实边界（写入 ADR-0013）
+- **真实 VSCode（Electron）里的 --permission 未验证**：本机测试跑在 Node 24.12，
+  VSCode 的 Electron 39 内置 Node 22.21（理论上支持）。提供
+  vscordis.isolation.permissionModel 逃生开关，但关掉必须明白强度降级。
+- fork 统一设置 ELECTRON_RUN_AS_NODE=1，避免 Electron 下去启动完整应用（未实测）。
+- 隔离插件不能参与服务依赖；崩溃即 failed，需手动 reload。

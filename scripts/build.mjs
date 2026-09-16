@@ -89,7 +89,30 @@ async function buildHostWeb() {
   console.log(`[web]    ${path.relative(root, outfile)}`)
 }
 
+/**
+ * 隔离子进程的引导脚本（M4b）。
+ *
+ * 它被打成**独立**的单文件 CJS，因为 Node 权限模型要求显式 `--allow-fs-read` 才能读取它；
+ * 分成独立文件后这条白名单才可能精确到"就这一个文件 + 插件目录"。
+ */
+async function buildIsolatedWorker() {
+  const outfile = path.join(root, 'packages', 'host', 'dist', 'isolated-worker.cjs')
+  mkdirSync(path.dirname(outfile), { recursive: true })
+  await build({
+    ...shared,
+    entryPoints: [path.join(root, 'packages', 'host', 'src', 'isolation', 'child-bootstrap.ts')],
+    outfile,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node20',
+    // 注意：这里**不能** external vscode。引导脚本永远不该 import vscode，
+    // 一旦有人误加，构建就会失败 —— 这正是我们要的护栏。
+  })
+  console.log(`[worker] ${path.relative(root, outfile)}`)
+}
+
 await buildPlugins()
 await buildHostNode()
 await buildHostWeb()
+await buildIsolatedWorker()
 console.log(production ? '[build] 完成（production）' : '[build] 完成（development，内联 sourcemap）')

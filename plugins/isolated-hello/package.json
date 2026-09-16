@@ -1,0 +1,10 @@
+{
+  "name": "vscordis-plugin-isolated-hello",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M4b demo: an untrusted plugin that runs in an isolated child process",
+  "dependencies": {
+    "@vscordis/sdk": "workspace:*"
+  }
+}

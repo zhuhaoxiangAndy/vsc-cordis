@@ -2,8 +2,11 @@ import { existsSync, readFileSync } from 'node:fs'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { PluginHost, describe, type PluginEntry, type PluginView } from '@vscordis/kernel'
-import { VscodeBridge } from './bridge.ts'
+import { isPermission, type Permission } from '@vscordis/sdk'
+import { VscodeBridge, type ModuleLoader } from './bridge.ts'
 import { discoverPlugins, expandRootVariables, sortByDependencies, type PluginRoot } from './discovery.ts'
+import { IsolatedPluginLoader } from './isolation/isolated-loader.ts'
+import { VscodeHostApi } from './isolation/vscode-host-api.ts'
 import { NodeModuleLoader } from './loader-node.ts'
 import { PluginWatcher, type ReloadPlan } from './watcher.ts'
 
@@ -29,6 +32,8 @@ export class Runtime {
   readonly #extensionUri: vscode.Uri
   readonly #publicKeyPem: string | undefined
   readonly #watcher: PluginWatcher
+  readonly #workerPath: string
+  readonly #supportsIsolation: boolean
   /** 规范化目录 → 插件 id。热重载要靠目录反查 id；目录被删除时也靠它决定卸载谁。 */
   readonly #dirToId = new Map<string, string>()
   #lastReloadMs = 0
@@ -41,7 +46,7 @@ export class Runtime {
     this.#extensionUri = options.extensionUri
     this.#publicKeyPem = readPublicKey(options.extensionUri)
 
-    const loader = new NodeModuleLoader({
+    const nodeLoader = new NodeModuleLoader({
       onLog: (message) => this.bridge.log('trace', message),
       integrity: {
         publicKeyPem: this.#publicKeyPem,
@@ -50,13 +55,50 @@ export class Runtime {
         requireSignature: (entry) => entry.source === 'global',
       },
     })
+
+    // ————— 隔离后端（M4b）—————
+    // 引导脚本不存在时**没有**隔离后端 → untrusted 插件继续被 fail-closed 拒绝，
+    // 绝不会悄悄退回同进程执行（ADR-0003）。
+    this.#workerPath = path.join(options.extensionUri.fsPath, 'dist', 'isolated-worker.cjs')
+    this.#supportsIsolation = options.supportsIsolation ?? existsSync(this.#workerPath)
+
+    const isolatedLoader = new IsolatedPluginLoader({
+      hostApi: new VscodeHostApi({
+        isPluginCommand: (command) => this.bridge.livePluginCommands().some((info) => info.command === command),
+        // 权限只能由宿主查清单得出：让子进程自述等于允许它给自己提权。
+        permissionsOf: (id) => {
+          const entry = this.#entries.find((candidate) => candidate.manifest.id === id)
+          const granted = new Set<Permission>()
+          // 用守卫过滤而不是硬转：清单里的权限是 string[]，而内核只放行已知权限
+          // （未知权限会在 manifest 校验期直接拒绝加载，所以这里过滤掉的只会是"理论上不该存在"的值）。
+          for (const value of entry?.manifest.permissions ?? []) {
+            if (isPermission(value)) granted.add(value)
+          }
+          return granted
+        },
+        log: (level, message, meta) => this.bridge.log(level, message, meta),
+      }),
+      workerPath: this.#workerPath,
+      publicKeyPem: this.#publicKeyPem,
+      disposeTimeoutMs: readDisposeTimeoutMs(),
+      usePermissionModel: vscode.workspace
+        .getConfiguration('vscordis')
+        .get<boolean>('isolation.permissionModel', true),
+      onLog: (message) => this.bridge.log('debug', message),
+    })
+
+    // 按 trust 路由：untrusted 走子进程，其余走 in-process。
+    // 路由放在这里而不是 bridge 里，是为了让 bridge 不必知道隔离的存在。
+    const routingLoader: ModuleLoader = {
+      load: (entry: PluginEntry) =>
+        entry.manifest.trust === 'untrusted' ? isolatedLoader.load(entry) : nodeLoader.load(entry),
+    }
+
     this.bridge = new VscodeBridge({
       platform: 'node',
-      // Node 宿主具备子进程能力 → 允许加载 untrusted（M4 之前实际上还没有进程后端，
-      // 因此这里保持 false，让 untrusted 插件被明确拒绝而不是悄悄降级到同进程，见 ADR-0003）。
-      supportsIsolation: options.supportsIsolation ?? false,
+      supportsIsolation: this.#supportsIsolation,
       output: options.output,
-      loader,
+      loader: routingLoader,
     })
     this.host = new PluginHost({
       port: this.bridge,
@@ -319,7 +361,9 @@ export class Runtime {
   statusLines(): readonly string[] {
     const lines: string[] = []
     lines.push(`VSCordis 运行时状态（${new Date().toISOString()}）`)
-    lines.push(`平台：node · 隔离后端：${this.bridge.supportsIsolation ? '可用' : '不可用（untrusted 插件会被拒绝）'}`)
+    lines.push(
+      `隔离子进程：${this.#supportsIsolation ? `可用（${path.relative(this.#extensionUri.fsPath, this.#workerPath)}）` : '不可用 —— untrusted 插件会被拒绝加载'}`,
+    )
     lines.push(
       `完整性校验：${this.#publicKeyPem === undefined ? '⚠ 未配置验签公钥（带签名的插件会被拒绝）' : '已配置验签公钥'}` +
         ' · globalStorage 插件必须签名（docs/signing.md）',
