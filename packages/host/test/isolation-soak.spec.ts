@@ -82,6 +82,24 @@ class SilentHostApi implements IsolatedHostApi {
 
   disposeOutput(): void {}
 
+  async readConfiguration(): Promise<Readonly<Record<string, unknown>>> {
+    return {}
+  }
+
+  onDidChangeConfiguration(): { dispose(): void } {
+    return { dispose: () => undefined }
+  }
+
+  createStatusBarItem(): number {
+    return this.#nextHandle++
+  }
+
+  updateStatusBarItem(): void {}
+
+  setStatusBarItemVisible(): void {}
+
+  disposeStatusBarItem(): void {}
+
   workspaceFolders(): readonly SerializedWorkspaceFolder[] {
     return []
   }

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode'
+import { PermissionDeniedError } from '@vscordis/kernel'
 import type { Disposable, LogLevel, Permission } from '@vscordis/sdk'
 import type { IsolatedHostApi } from './isolated-loader.ts'
 import type { SerializedWorkspaceFolder } from './protocol.ts'
@@ -31,6 +32,7 @@ export interface VscodeHostApiOptions {
 export class VscodeHostApi implements IsolatedHostApi {
   readonly #options: VscodeHostApiOptions
   readonly #outputs = new Map<number, vscode.OutputChannel>()
+  readonly #statusBarItems = new Map<number, { item: vscode.StatusBarItem; pluginId: string }>()
   readonly #commands = new Map<string, string>()
   #nextHandle = 1
 
@@ -113,6 +115,96 @@ export class VscodeHostApi implements IsolatedHostApi {
     channel.dispose()
   }
 
+  /**
+   * 按声明预取配置值。
+   *
+   * 返回的键是**全限定名**（`section.key`）：子进程无法可靠地拼出宿主侧的 section，
+   * 由宿主统一拼好，子进程只管按键查表。
+   */
+  async readConfiguration(
+    pluginId: string,
+    section: string,
+    keys: readonly string[],
+  ): Promise<Readonly<Record<string, unknown>>> {
+    if (!this.#options.permissionsOf(pluginId).has('vscode:workspace.config.read')) {
+      throw new PermissionDeniedError(pluginId, 'vscode:workspace.config.read', `读取配置段 ${section}`)
+    }
+    const configuration = vscode.workspace.getConfiguration(section)
+    const values: Record<string, unknown> = {}
+    for (const key of keys) values[`${section}.${key}`] = configuration.get(key)
+    return values
+  }
+
+  onDidChangeConfiguration(
+    pluginId: string,
+    section: string,
+    keys: readonly string[],
+    listener: (values: Readonly<Record<string, unknown>>) => void,
+  ): Disposable {
+    const subscription = vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration(section)) return
+      const configuration = vscode.workspace.getConfiguration(section)
+      const values: Record<string, unknown> = {}
+      for (const key of keys) values[`${section}.${key}`] = configuration.get(key)
+      listener(values)
+    })
+    void pluginId
+    return subscription
+  }
+
+  createStatusBarItem(
+    pluginId: string,
+    alignment: number,
+    priority: number,
+    initial: { readonly text: string },
+  ): number {
+    // 位置参数用的是 VSCode 的枚举值（Left=0 / Right=1 / Right=2），直接透传。
+    const item = vscode.window.createStatusBarItem(alignment as vscode.StatusBarAlignment, priority)
+    item.text = initial.text
+    const handle = this.#nextHandle++
+    this.#statusBarItems.set(handle, { item, pluginId })
+    return handle
+  }
+
+  updateStatusBarItem(
+    handle: number,
+    patch: {
+      readonly text?: string
+      readonly tooltip?: string
+      readonly command?: string
+      readonly color?: string
+      readonly name?: string
+      readonly accessibilityInformation?: unknown
+    },
+  ): void {
+    const entry = this.#statusBarItems.get(handle)
+    if (entry === undefined) return
+    if (patch.text !== undefined) entry.item.text = patch.text
+    if (patch.tooltip !== undefined) entry.item.tooltip = patch.tooltip
+    if (patch.command !== undefined) entry.item.command = patch.command.length === 0 ? undefined : patch.command
+    if (patch.color !== undefined) entry.item.color = patch.color.length === 0 ? undefined : patch.color
+    if (patch.name !== undefined) entry.item.name = patch.name.length === 0 ? undefined : patch.name
+    if (patch.accessibilityInformation !== undefined) {
+      entry.item.accessibilityInformation = patch.accessibilityInformation === null
+        ? undefined
+        : (patch.accessibilityInformation as vscode.AccessibilityInformation)
+    }
+  }
+
+  setStatusBarItemVisible(handle: number, visible: boolean): void {
+    const entry = this.#statusBarItems.get(handle)
+    if (entry === undefined) return
+    if (visible) entry.item.show()
+    else entry.item.hide()
+  }
+
+  disposeStatusBarItem(handle: number): void {
+    const entry = this.#statusBarItems.get(handle)
+    if (entry === undefined) return
+    this.#statusBarItems.delete(handle)
+    entry.item.dispose()
+  }
+
   workspaceFolders(): readonly SerializedWorkspaceFolder[] {
     // 必须降级成纯数据：`Uri` / `WorkspaceFolder` 是类实例，塞进 IPC 会破坏结构。
     return (vscode.workspace.workspaceFolders ?? []).map((folder) => ({
@@ -130,6 +222,7 @@ export class VscodeHostApi implements IsolatedHostApi {
   /** 释放全部宿主侧资源（宿主关闭时兜底）。 */
   dispose(): void {
     for (const handle of [...this.#outputs.keys()]) this.disposeOutput(handle)
+    for (const handle of [...this.#statusBarItems.keys()]) this.disposeStatusBarItem(handle)
     this.#commands.clear()
   }
 }

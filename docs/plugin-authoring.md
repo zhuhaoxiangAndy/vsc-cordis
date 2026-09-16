@@ -75,12 +75,47 @@ export default {
 | 运行位置 | 扩展宿主进程内 | 独立子进程 |
 | 安全边界 | **无**（只防误用：你仍能绕过受控 API，见 ADR-0003） | 真边界：无 `vscode`、fs 受 Node 权限模型限制 |
 | 性能 | 直接调用 | 每次 API 调用都是一次 IPC 往返 |
-| 服务（`ctx.use` / `provide`） | ✅ | ❌ 抛错（服务是进程内对象，跨进程共享需要 IDL） |
-| `createStatusBarItem` / `getConfiguration` / `onDidSaveTextDocument` | ✅ | ❌ 抛错并说明原因 |
+| 服务（`ctx.use` / `provide`） | ✅ | ❌ 抛错（服务是**带方法的进程内对象**，代理会让 `now()` 从 `Date` 变成 `Promise<Date>`） |
+| `getConfiguration` | ✅ | ✅ **按声明预取**：在 `plugin.json` 里写 `configuration`，宿主预取并在配置变化时推送 |
+| `createStatusBarItem` | ✅ | ✅ 本地镜像 + 串行 RPC（读属性是同步的；未支持的属性会**响亮抛错**） |
+| `onDidSaveTextDocument` | ✅ | ❌ 抛错（回调参数 `TextDocument` 带同步方法，跨进程只能给纯数据 —— 类型契约会撒谎） |
 | 命令 handler | 同步/异步都可以 | 宿主会**反向调用**你的 handler 并把结果回传 |
 | 适合 | 自研、团队内部、需要服务协作的插件 | 第三方、需要真隔离的插件 |
 
 **同一份插件代码在两种模式下写法一致**，差异只在运行时的能力边界上。
+两个 ❌ 是**设计边界而非待办**：要支持它们，就得给隔离模式一套独立的、显式异步的 API 面，
+那会让"同一份代码两边一样"这个前提失效。理由见 ADR-0016。
+
+### 隔离模式读配置：必须声明
+
+```jsonc
+// plugin.json
+"configuration": { "section": "my-plugin", "keys": ["greeting", "verbose"] }
+```
+
+```ts
+// 插件里：同步读，和同进程模式写法完全一样
+const greeting = ctx.vscode.workspace.getConfiguration('my-plugin').get('greeting', '你好')
+```
+
+- 宿主在**激活时**按 `keys` 预取，并在配置变化时**推送**更新 → 所以 `get()` 既能保持同步，也不陈旧。
+- **未声明的键只能拿到默认值**，并会在宿主的输出通道里告警一次。
+- ⚠️ 配置的 `section` 由你决定，但**宿主扩展的 `contributes.configuration` 才是设置 UI 的来源** ——
+  插件无法贡献设置项，所以你的配置键目前只能手写进 `settings.json`
+  （VSCode 会提示"未知配置设置"，但值能正常读到）。要让它出现在设置 UI 里需要宿主代插件声明，暂未实现。
+
+### 隔离模式写状态栏项
+
+```ts
+const item = ctx.vscode.window.createStatusBarItem(1, 100)   // 需要 vscode:window.statusbar
+item.text = '$(shield) ready'
+item.command = 'my-plugin.run'
+item.show()
+ctx.effect(() => item, (i) => i.dispose(), 'status:my-plugin')
+```
+
+支持 `text / tooltip / command / color / name / accessibilityInformation` 与 `show / hide / dispose`；
+`alignment` / `priority` 只在创建时生效。**设置其它属性会抛错**（而不是静默无效）。
 若你的插件用到了上表里标 ❌ 的能力，选 `trusted`（并接受"只防误用"这个事实），
 或者等对应的隔离能力补齐（见 ADR-0013 的 M4c 清单）。
 

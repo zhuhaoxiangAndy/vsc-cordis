@@ -1,13 +1,19 @@
 {
   "id": "isolated-hello",
-  "name": "Isolated Hello (M4b)",
+  "name": "Isolated Hello (M4b/M4c)",
   "version": "1.0.0",
-  "description": "声明 trust: untrusted，运行在独立子进程中：无 vscode 模块、fs 被 Node 权限模型限制、命令 handler 走反向 RPC",
+  "description": "声明 trust: untrusted，运行在独立子进程中：无 vscode 模块、fs 被 Node 权限模型限制、命令 handler 走反向 RPC、配置按声明预取、状态栏项走本地镜像 + 串行 RPC",
   "main": "dist/index.cjs",
   "trust": "untrusted",
+  "configuration": {
+    "section": "isolated-hello",
+    "keys": ["greeting"]
+  },
   "permissions": [
     "vscode:commands.register",
     "vscode:window.messages",
-    "vscode:window.output"
+    "vscode:window.output",
+    "vscode:window.statusbar",
+    "vscode:workspace.config.read"
   ]
 }

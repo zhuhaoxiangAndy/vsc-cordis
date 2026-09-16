@@ -84,6 +84,7 @@ export function toIsolatedPermissions(permissions: ReadonlySet<Permission>): Iso
     window: {
       messages: has('vscode:window.messages'),
       output: has('vscode:window.output'),
+      statusBar: has('vscode:window.statusbar'),
     },
     workspace: {
       read: has('vscode:workspace.read'),

@@ -35,7 +35,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 119 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 141 项测试 + 构建 + 产物冒烟
 ```
 
 开发时开两个进程：
@@ -94,11 +94,16 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 - 子进程的寿命 = 宿主侧的一项 effect，卸载时 `kill` 是兜底。
 
 隔离层刻意**不 import `vscode`**（宿主能力由接口注入），因此整条链路可以用 `node --test`
-端到端验证：10 项测试跑的是**真实子进程 + 真实 IPC + 真实 `--permission`**。
+端到端验证：**16 项测试**跑的是**真实子进程 + 真实 IPC + 真实 `--permission`**。
 示例插件 `plugins/isolated-hello`，手动验收见 `docs/acceptance-m4b.md`。
 
-刻意收窄的边界（抛错并说明原因，不给假接口）：隔离插件**不能**用服务（`ctx.use`/`provide`）、
-**不能**用 `createStatusBarItem` / `getConfiguration` / `onDidSaveTextDocument` —— 这些留到 M4c。
+刻意收窄的边界 —— 两个 ❌ 是**设计边界而非待办**：隔离插件不能用服务（`ctx.use`/`provide`），
+也不能订阅 `onDidSaveTextDocument`。理由是**类型契约会撒谎**：服务是带同步方法的进程内对象、
+事件回调参数 `TextDocument` 也带同步方法，跨进程只能给纯数据或 Promise，
+于是"同一份插件代码两边一样"这个前提就不成立了。详见 `docs/adr/0016-isolation-capability-tradeoffs.md`。
+
+隔离模式**支持**配置读取（`plugin.json` 里声明 `configuration.keys`，宿主预取快照 + 变化推送，
+插件侧 `get()` 保持同步）与状态栏项（本地镜像 + 串行 RPC，未支持的属性响亮抛错）。
 `net` 权限是**约定**而非强制（Node 没有网络开关）。详见 `docs/adr/0013-isolation-backend.md`。
 
 ## CLI（M5）

@@ -28,6 +28,10 @@ export type HostMethod =
   | 'window.createOutputChannel'
   | 'output.appendLine'
   | 'output.dispose'
+  | 'statusBar.create'
+  | 'statusBar.update'
+  | 'statusBar.setVisible'
+  | 'statusBar.dispose'
   | 'log'
 
 export interface IsolatedPermissions {
@@ -39,6 +43,7 @@ export interface IsolatedPermissions {
   readonly window: {
     readonly messages: boolean
     readonly output: boolean
+    readonly statusBar: boolean
   }
   readonly workspace: {
     readonly read: boolean
@@ -67,8 +72,18 @@ export type HostToChild =
       readonly pluginEntry: string
       readonly permissions: IsolatedPermissions
       readonly workspaceFolders: readonly SerializedWorkspaceFolder[]
+      /** 按 `plugin.json#configuration` 预取的配置**快照**（键 → 值）。 */
+      readonly configSnapshot: Readonly<Record<string, unknown>>
       readonly disposeTimeoutMs: number
     }
+  /**
+   * 配置变化推送。
+   *
+   * 为什么是"推送"而不是"子进程去问"：VSCode 的 `WorkspaceConfiguration.get()` 是**同步**的。
+   * 若让子进程按需向宿主查询，它只能返回 Promise —— 那就成了"类型是同步、实际异步"的假接口。
+   * 所以宿主在配置变化时主动把新值推过来，子进程侧始终读本地缓存（ADR-0016）。
+   */
+  | { readonly kind: 'configChanged'; readonly values: Readonly<Record<string, unknown>> }
   | { readonly kind: 'response'; readonly id: number; readonly ok: true; readonly value: unknown }
   | { readonly kind: 'response'; readonly id: number; readonly ok: false; readonly error: string }
   | { readonly kind: 'invoke'; readonly requestId: number; readonly command: string; readonly args: readonly unknown[] }
@@ -97,14 +112,17 @@ export function errorToWire(error: unknown): string {
  * 后者会让插件作者在运行时才发现语义完全不同。每个原因都写清"为什么"和"何时会有"。
  */
 export const ISOLATION_UNSUPPORTED: Readonly<Record<string, string>> = {
-  'window.createStatusBarItem':
-    '隔离模式下暂不支持状态栏项：它需要一个能读写属性的代理对象，属于 M4c 的范围。' +
-    '如果你不需要隔离，可以把插件改为 trust: trusted（见 ADR-0003 的说明：trusted 只防误用、不防恶意）。',
-  'workspace.getConfiguration':
-    '隔离模式下暂不支持读取配置：同步语义要求宿主在激活时按"插件声明的配置键"预取快照，' +
-    '这需要在 plugin.json 里引入 configuration 声明，属于 M4c 的范围。',
   'workspace.onDidSaveTextDocument':
-    '隔离模式下暂不支持事件订阅：需要宿主→子进程的事件转发通道，属于 M4c 的范围。',
+    '隔离模式下不支持事件订阅。原因不是"还没做"，而是**类型契约会撒谎**：' +
+    'VSCode 的事件回调参数是 TextDocument，它带 getText() / positionAt() 这类**同步方法**；' +
+    '跨进程只能传纯数据子集，那样类型上写着有、运行时却是 undefined 或抛错。' +
+    '要支持它，就得给隔离模式一套独立的、显式异步的 API 面，而不是让同一份插件代码' +
+    '看起来两边一样。这个取舍见 ADR-0016。',
+  'services':
+    '隔离模式下不支持 ctx.use / ctx.provide。原因同上但更严重：服务是**带方法的进程内对象**，' +
+    '跨进程代理会让 clock.now() 从返回 Date 变成返回 Promise<Date> —— ' +
+    '插件代码在两种模式下就不能是同一份了。' +
+    '需要服务协作的插件请用 trust: trusted（并接受"只防误用、不防恶意"，见 ADR-0003）。',
 }
 
 export function unsupportedReason(member: string): string {

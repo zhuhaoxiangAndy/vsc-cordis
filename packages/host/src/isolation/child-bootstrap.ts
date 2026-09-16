@@ -212,6 +212,195 @@ async function drainHostCalls(): Promise<void> {
 
 let workspaceFolders: readonly SerializedWorkspaceFolder[] = []
 
+/**
+ * 配置快照（键 → 值，键是**全限定名** `section.key`）。
+ *
+ * 宿主在激活时预取、在配置变化时推送，插件侧的 `get()` 因此始终同步且不陈旧。
+ * 这是"不撒谎地支持同步 API"的唯一办法 —— 详见 ADR-0016。
+ */
+let configSnapshot: Readonly<Record<string, unknown>> = {}
+/** 未声明的键只告警一次，避免刷屏。 */
+const warnedConfigKeys = new Set<string>()
+
+function readConfig(section: string | undefined, key: string, fallback: unknown): unknown {
+  const qualified = section === undefined || section.length === 0 ? key : `${section}.${key}`
+  if (Object.prototype.hasOwnProperty.call(configSnapshot, qualified)) return configSnapshot[qualified]
+  if (Object.prototype.hasOwnProperty.call(configSnapshot, key)) return configSnapshot[key]
+
+  const missing = section === undefined ? qualified : qualified
+  if (!warnedConfigKeys.has(missing)) {
+    warnedConfigKeys.add(missing)
+    log(
+      'warn',
+      `读取了未声明的配置键 "${missing}"，只能返回默认值。` +
+        '请在 plugin.json 的 configuration.keys 里声明它（隔离模式靠声明预取，见 ADR-0016）。',
+    )
+  }
+  return fallback
+}
+
+function hasConfig(section: string | undefined, key: string): boolean {
+  const qualified = section === undefined || section.length === 0 ? key : `${section}.${key}`
+  return (
+    Object.prototype.hasOwnProperty.call(configSnapshot, qualified) ||
+    Object.prototype.hasOwnProperty.call(configSnapshot, key)
+  )
+}
+
+function createConfigurationView(section: string | undefined): unknown {
+  return {
+    get: (key: string, fallback?: unknown) => readConfig(section, key, fallback),
+    has: (key: string) => hasConfig(section, key),
+    inspect: () => undefined,
+    update: () => {
+      throw new Error(
+        '隔离模式不支持写配置。若确实需要，请让宿主代为写入（M4c 未覆盖），或改用 trust: trusted（只防误用）。',
+      )
+    },
+  }
+}
+
+/**
+ * 状态栏项：本地镜像 + 串行 RPC。
+ *
+ * 两点值得注意：
+ * - **本地镜像**：`item.text = 'x'` 之后 `item.text` 必须立刻读回 'x'。
+ *   如果每次都去问宿主，读属性就变成异步的了 —— 那又是假接口。
+ * - **串行队列**：`item.text = 'x'; item.show()` 这两步必须按顺序到达宿主，
+ *   否则会出现"显示了但文字还是旧的"。用一条 promise 链而不是各自 fire-and-forget。
+ */
+function createStatusBarItem(alignment?: number, priority?: number): unknown {
+  const state = {
+    text: '',
+    tooltip: '',
+    command: undefined as string | undefined,
+    color: undefined as string | undefined,
+    name: undefined as string | undefined,
+    accessibilityInformation: undefined as unknown,
+  }
+  let handle = -1
+  let creating: Promise<void> | undefined
+  let queue: Promise<void> = Promise.resolve()
+
+  const ensure = (): Promise<void> => {
+    creating ??= callHost('statusBar.create', [alignment ?? 0, priority ?? 0, { text: state.text }]).then(
+      (value) => {
+        handle = (value as { handle: number }).handle
+      },
+    )
+    return creating
+  }
+
+  const enqueue = (what: string, task: () => Promise<unknown>): void => {
+    queue = queue
+      .then(() => ensure())
+      .then(task)
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          log('warn', `状态栏项 ${what} 失败：${errorToWire(error)}`)
+        },
+      )
+  }
+
+  const patch = (what: string, key: string, value: unknown): void => {
+    enqueue(what, () => callHost('statusBar.update', [handle, { [key]: value }]))
+  }
+
+  const target = {
+    get text(): string {
+      return state.text
+    },
+    set text(value: string) {
+      state.text = value
+      patch('text', 'text', value)
+    },
+    get tooltip(): string {
+      return state.tooltip
+    },
+    set tooltip(value: string | undefined) {
+      state.tooltip = value ?? ''
+      patch('tooltip', 'tooltip', value ?? '')
+    },
+    get command(): string | undefined {
+      return state.command
+    },
+    set command(value: string | undefined) {
+      state.command = value
+      patch('command', 'command', value ?? '')
+    },
+    get color(): string | undefined {
+      return state.color
+    },
+    set color(value: string | undefined) {
+      state.color = value
+      patch('color', 'color', value ?? '')
+    },
+    get name(): string | undefined {
+      return state.name
+    },
+    set name(value: string | undefined) {
+      state.name = value
+      patch('name', 'name', value ?? '')
+    },
+    get accessibilityInformation(): unknown {
+      return state.accessibilityInformation
+    },
+    set accessibilityInformation(value: unknown) {
+      state.accessibilityInformation = value
+      patch('accessibilityInformation', 'accessibilityInformation', value)
+    },
+    get alignment(): number {
+      return alignment ?? 0
+    },
+    get priority(): number {
+      return priority ?? 0
+    },
+    show(): void {
+      enqueue('show', () => callHost('statusBar.setVisible', [handle, true]))
+    },
+    hide(): void {
+      enqueue('hide', () => callHost('statusBar.setVisible', [handle, false]))
+    },
+    dispose(): void {
+      enqueue('dispose', () => callHost('statusBar.dispose', [handle]))
+    },
+  }
+
+  /**
+   * 为什么用 Proxy：普通对象对**未支持的属性赋值是静默接受**的 ——
+   * 插件写 `item.backgroundColor = 'red'` 会既不改 UI 也不报错，这正是最难查的一类问题。
+   * 这里对未知属性直接抛错，并列出真正支持的集合。
+   */
+  const SUPPORTED_PROPERTIES = new Set([
+    'text',
+    'tooltip',
+    'command',
+    'color',
+    'name',
+    'accessibilityInformation',
+    'alignment',
+    'priority',
+    'show',
+    'hide',
+    'dispose',
+  ])
+
+  return new Proxy(target, {
+    set(object, property, value) {
+      if (typeof property === 'string' && !SUPPORTED_PROPERTIES.has(property)) {
+        throw new Error(
+          `隔离模式的状态栏项不支持属性 "${property}"。` +
+            '支持的属性：text / tooltip / command / color / name / accessibilityInformation；' +
+            '方法：show / hide / dispose。' +
+            '（同进程模式没有这个限制，但那样就没有隔离边界了，见 ADR-0003。）',
+        )
+      }
+      return Reflect.set(object, property, value, object)
+    },
+  })
+}
+
 function buildVscodeProxy(permissions: IsolatedPermissions): PluginVscodeApi {
   const unsupported = (member: string): never => {
     throw new Error(unsupportedReason(member))
@@ -249,7 +438,10 @@ function buildVscodeProxy(permissions: IsolatedPermissions): PluginVscodeApi {
         callHost('window.showWarningMessage', [message])) as unknown as PluginVscodeApi['window']['showWarningMessage'],
       showErrorMessage: ((message: string) =>
         callHost('window.showErrorMessage', [message])) as unknown as PluginVscodeApi['window']['showErrorMessage'],
-      createStatusBarItem: (() => unsupported('window.createStatusBarItem')) as unknown as PluginVscodeApi['window']['createStatusBarItem'],
+      createStatusBarItem: ((alignment?: number, priority?: number) => {
+        requireLocally(permissions.window.statusBar, 'vscode:window.statusbar')
+        return createStatusBarItem(alignment, priority)
+      }) as unknown as PluginVscodeApi['window']['createStatusBarItem'],
       createOutputChannel: ((name: string) => {
         requireLocally(permissions.window.output, 'vscode:window.output')
         return createOutputChannelHandle(name)
@@ -259,7 +451,8 @@ function buildVscodeProxy(permissions: IsolatedPermissions): PluginVscodeApi {
       get workspaceFolders(): readonly never[] | undefined {
         return workspaceFolders as never[]
       },
-      getConfiguration: (() => unsupported('workspace.getConfiguration')) as unknown as PluginVscodeApi['workspace']['getConfiguration'],
+      getConfiguration: ((section?: string) =>
+        createConfigurationView(section)) as unknown as PluginVscodeApi['workspace']['getConfiguration'],
       onDidSaveTextDocument: (() => unsupported('workspace.onDidSaveTextDocument')) as unknown as PluginVscodeApi['workspace']['onDidSaveTextDocument'],
     },
     Uri: LocalUri,
@@ -351,10 +544,8 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
   const { pluginId } = activation
 
   const notSupported = (what: string): never => {
-    throw new Error(
-      `隔离模式下${what}暂不支持：服务是进程内对象，跨进程共享需要完整的 IDL 与序列化契约（M4c）。` +
-        '如果你不需要隔离，可以把插件改为 trust: trusted（注意 trusted 只防误用、不防恶意，见 ADR-0003）。',
-    )
+    // 文案来自协议层，保证"不支持的理由"只有一处定义（避免两处说法不一致）
+    throw new Error(unsupportedReason(what))
   }
 
   const ctx: PluginContext = {
@@ -376,10 +567,10 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
     scope: (label?: string) => buildContext(activation, stack.scope(label)),
     effects: stack,
 
-    use: () => notSupported('使用服务（ctx.use）'),
-    tryUse: () => notSupported('使用服务（ctx.tryUse）'),
-    provide: () => notSupported('提供服务（ctx.provide）'),
-    graph: () => notSupported('读取依赖图（ctx.graph）'),
+    use: () => notSupported('services'),
+    tryUse: () => notSupported('services'),
+    provide: () => notSupported('services'),
+    graph: () => notSupported('services'),
     onDispose: (teardown, label) => stack.add(teardown, label),
   }
 
@@ -393,6 +584,9 @@ async function activate(message: Extract<HostToChild, { kind: 'activate' }>): Pr
     }
     installModuleGuards(message.permissions)
     workspaceFolders = message.workspaceFolders
+    // 配置快照随激活一起下发：插件侧的 get() 因此可以保持同步语义（ADR-0016）。
+    configSnapshot = message.configSnapshot
+    warnedConfigKeys.clear()
 
     const exported: unknown = nodeRequire(message.pluginEntry)
     const plugin = resolvePluginExport(exported)
@@ -477,6 +671,10 @@ process.on('message', (raw: unknown) => {
       else pending.reject(new Error(message.error))
       break
     }
+    case 'configChanged':
+      // 增量合并：宿主只推变化的键，未提到的键保留原值。
+      configSnapshot = { ...configSnapshot, ...message.values }
+      break
     case 'invoke':
       invokeCommand(message.requestId, message.command, message.args)
       break

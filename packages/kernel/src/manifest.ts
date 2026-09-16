@@ -20,6 +20,12 @@ export interface NormalizedManifest {
   readonly dependencies: Readonly<Record<string, string>>
   /** 声明的服务（供静态工具使用；运行期以 ctx.provide 为准，宿主会比对并告警，见 ADR-0014）。 */
   readonly provides: readonly string[]
+  /**
+   * 声明的配置键（供隔离模式的同步读取使用，见 ADR-0016）。
+   * 缺省 `undefined` 表示"没有声明" —— 与 `provides` 归一化成数组不同，
+   * 这里的"没有"天然就是 undefined，硬造一个空对象反而会掩盖意图。
+   */
+  readonly configuration?: { readonly section: string; readonly keys: readonly string[] }
   readonly permissions: readonly string[]
   readonly trust: PluginTrust
 }
@@ -30,6 +36,8 @@ export type ManifestValidation =
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$/
 const SERVICE_NAME_PATTERN = /^[a-z][a-z0-9-]*(\.[a-z0-9-]+)*$/
+/** 配置 section 与插件 id 同形（VSCode 的配置段名就是这个形状）。 */
+const SECTION_PATTERN = ID_PATTERN
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/
 const ENTRY_PATTERN = /\.(cjs|mjs|js)$/
 
@@ -81,6 +89,8 @@ export function validateManifest(raw: unknown): ManifestValidation {
 
   const provides = readProvides(record, errors)
 
+  const configuration = readConfiguration(record, errors)
+
   const permissions = readPermissions(record, errors)
 
   const trust = readTrust(record, errors)
@@ -97,6 +107,7 @@ export function validateManifest(raw: unknown): ManifestValidation {
     description,
     dependencies,
     provides,
+    configuration,
     permissions,
     trust,
   }
@@ -166,6 +177,42 @@ function readProvides(record: Record<string, unknown>, errors: string[]): string
     if (!result.includes(item)) result.push(item)
   }
   return result
+}
+
+function readConfiguration(
+  record: Record<string, unknown>,
+  errors: string[],
+): { readonly section: string; readonly keys: readonly string[] } | undefined {
+  const value = record.configuration
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    errors.push('configuration 应为 { section, keys } 对象')
+    return undefined
+  }
+  const entry = value as Record<string, unknown>
+  const section = entry.section
+  if (typeof section !== 'string' || !SECTION_PATTERN.test(section)) {
+    errors.push(`configuration.section 非法：${String(section)}（要求小写字母/数字/连字符，可带点分段）`)
+    return undefined
+  }
+  const rawKeys = entry.keys
+  if (!Array.isArray(rawKeys)) {
+    errors.push('configuration.keys 应为字符串数组')
+    return undefined
+  }
+  const keys: string[] = []
+  for (const key of rawKeys) {
+    if (typeof key !== 'string' || key.trim().length === 0) {
+      errors.push(`configuration.keys 含非法键：${String(key)}`)
+      continue
+    }
+    if (!keys.includes(key)) keys.push(key)
+  }
+  if (keys.length === 0) {
+    errors.push('configuration.keys 不能为空数组（要么不写 configuration，要么至少声明一个键）')
+    return undefined
+  }
+  return { section, keys }
 }
 
 function readPermissions(record: Record<string, unknown>, errors: string[]): string[] {

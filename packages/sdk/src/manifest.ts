@@ -29,6 +29,21 @@ export interface PluginManifest {
    * （见 ADR-0014）。这是刻意的：声明只服务于工具，运行期事实才是权威。
    */
   readonly provides?: readonly string[]
+  /**
+   * **声明**本插件会读取哪些配置项。
+   *
+   * 为什么需要它：隔离模式下插件的配置读取必须是**同步**的（VSCode 的
+   * `WorkspaceConfiguration.get()` 就是同步的），而跨进程只能异步取。
+   * 解决办法是宿主在激活时按这份声明**预取快照**发给子进程，并在配置变化时**主动推送**更新 ——
+   * 于是插件侧的 `get()` 仍然同步，而且不陈旧。
+   *
+   * 代价：未声明的键只能拿到默认值（并会告警）。这是刻意取舍 ——
+   * 否则就只能给一个"类型是同步、实际返回 Promise"的假接口（ADR-0016）。
+   */
+  readonly configuration?: {
+    readonly section: string
+    readonly keys: readonly string[]
+  }
   /** 权限白名单；未声明 = 未授予（ADR-0005） */
   readonly permissions?: readonly string[]
   readonly trust?: PluginTrust

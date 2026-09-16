@@ -42,6 +42,37 @@ export interface IsolatedHostApi {
   createOutputChannel(pluginId: string, name: string): number
   appendOutputLine(handle: number, line: string): void
   disposeOutput(handle: number): void
+  /**
+   * 按插件在 `plugin.json#configuration` 里声明的键**预取**配置值。
+   * 返回的键是**全限定名**（`section.key`），因为子进程无法可靠地拼出宿主侧的 section。
+   */
+  readConfiguration(pluginId: string, section: string, keys: readonly string[]): Promise<Readonly<Record<string, unknown>>>
+  /** 订阅这些键的变化，用于把新值推给子进程（ADR-0016）。返回的 Disposable 在卸载时释放。 */
+  onDidChangeConfiguration(
+    pluginId: string,
+    section: string,
+    keys: readonly string[],
+    listener: (values: Readonly<Record<string, unknown>>) => void,
+  ): Disposable
+  createStatusBarItem(
+    pluginId: string,
+    alignment: number,
+    priority: number,
+    initial: { readonly text: string },
+  ): number
+  updateStatusBarItem(
+    handle: number,
+    patch: {
+      readonly text?: string
+      readonly tooltip?: string
+      readonly command?: string
+      readonly color?: string
+      readonly name?: string
+      readonly accessibilityInformation?: unknown
+    },
+  ): void
+  setStatusBarItemVisible(handle: number, visible: boolean): void
+  disposeStatusBarItem(handle: number): void
   workspaceFolders(): readonly SerializedWorkspaceFolder[]
   log(pluginId: string, level: LogLevel, message: string): void
 }
@@ -203,6 +234,8 @@ class IsolatedSession {
   readonly #invokes = new Map<number, Deferred<unknown>>()
   readonly #commandHandles = new Map<string, Disposable>()
   readonly #outputHandles = new Set<number>()
+  readonly #statusBarHandles = new Set<number>()
+  #configSubscription: Disposable | undefined
   #child: ChildProcess | undefined
   #exited: Promise<void> = Promise.resolve()
   #requestSeq = 0
@@ -264,6 +297,14 @@ class IsolatedSession {
 
     await withTimeout(this.#ready.promise, this.#options.readyTimeoutMs, `等待子进程就绪（${this.#pluginId}）`)
 
+    // 配置快照：按下 plugin.json 的 configuration 声明预取。
+    // 没有声明就是空对象 —— 子进程读到未声明的键只会拿默认值并告警（ADR-0016）。
+    const configuration = this.#options.entry.manifest.configuration
+    const configSnapshot =
+      configuration === undefined
+        ? {}
+        : await this.#options.hostApi.readConfiguration(this.#pluginId, configuration.section, configuration.keys)
+
     this.#send({
       kind: 'activate',
       protocolVersion: PROTOCOL_VERSION,
@@ -271,8 +312,21 @@ class IsolatedSession {
       pluginEntry: this.#options.entry.mainPath,
       permissions: toIsolatedPermissions(new Set(this.#options.entry.manifest.permissions as readonly Permission[])),
       workspaceFolders: this.#options.hostApi.workspaceFolders(),
+      configSnapshot,
       disposeTimeoutMs: this.#options.disposeTimeoutMs,
     })
+
+    if (configuration !== undefined) {
+      // 配置变化时主动推送：这样插件侧的 get() 既能保持同步，又不会读到陈旧值。
+      this.#configSubscription = this.#options.hostApi.onDidChangeConfiguration(
+        this.#pluginId,
+        configuration.section,
+        configuration.keys,
+        (values) => {
+          this.#send({ kind: 'configChanged', values })
+        },
+      )
+    }
 
     await withTimeout(this.#activated.promise, this.#options.readyTimeoutMs, `等待插件激活（${this.#pluginId}）`)
   }
@@ -430,6 +484,56 @@ class IsolatedSession {
           this.#reply(call.id, undefined)
           break
         }
+        case 'statusBar.create': {
+          require('vscode:window.statusbar')
+          const alignment = Number(call.args[0] ?? 0)
+          const priority = Number(call.args[1] ?? 0)
+          const initial = (call.args[2] ?? { text: '' }) as { text?: string }
+          const handle = this.#options.hostApi.createStatusBarItem(pluginId, alignment, priority, {
+            text: String(initial.text ?? ''),
+          })
+          this.#statusBarHandles.add(handle)
+          this.#reply(call.id, { handle })
+          break
+        }
+        case 'statusBar.update': {
+          require('vscode:window.statusbar')
+          const handle = Number(call.args[0])
+          if (!this.#statusBarHandles.has(handle)) throw new Error(`未知的状态栏项句柄：${handle}`)
+          const raw = (call.args[1] ?? {}) as Record<string, unknown>
+          const patch: {
+            text?: string
+            tooltip?: string
+            command?: string
+            color?: string
+            name?: string
+            accessibilityInformation?: unknown
+          } = {}
+          if (typeof raw.text === 'string') patch.text = raw.text
+          if (typeof raw.tooltip === 'string') patch.tooltip = raw.tooltip
+          if (typeof raw.command === 'string') patch.command = raw.command
+          if (typeof raw.color === 'string') patch.color = raw.color
+          if (typeof raw.name === 'string') patch.name = raw.name
+          if ('accessibilityInformation' in raw) patch.accessibilityInformation = raw.accessibilityInformation
+          this.#options.hostApi.updateStatusBarItem(handle, patch)
+          this.#reply(call.id, undefined)
+          break
+        }
+        case 'statusBar.setVisible': {
+          require('vscode:window.statusbar')
+          const handle = Number(call.args[0])
+          if (!this.#statusBarHandles.has(handle)) throw new Error(`未知的状态栏项句柄：${handle}`)
+          this.#options.hostApi.setStatusBarItemVisible(handle, Boolean(call.args[1]))
+          this.#reply(call.id, undefined)
+          break
+        }
+        case 'statusBar.dispose': {
+          require('vscode:window.statusbar')
+          const handle = Number(call.args[0])
+          if (this.#statusBarHandles.delete(handle)) this.#options.hostApi.disposeStatusBarItem(handle)
+          this.#reply(call.id, undefined)
+          break
+        }
         case 'log': {
           this.#options.hostApi.log(pluginId, 'info', String(call.args[0] ?? ''))
           this.#reply(call.id, undefined)
@@ -471,6 +575,24 @@ class IsolatedSession {
       }
     }
     this.#outputHandles.clear()
+
+    // 状态栏项也必须回收：子进程没了而状态栏还挂着，就是一块点不动的僵尸 UI。
+    for (const handle of this.#statusBarHandles) {
+      try {
+        this.#options.hostApi.disposeStatusBarItem(handle)
+      } catch {
+        // 同上
+      }
+    }
+    this.#statusBarHandles.clear()
+
+    // 配置订阅同理：不摘掉的话，插件卸载后宿主还在为一个不存在的进程准备推送。
+    try {
+      this.#configSubscription?.dispose()
+    } catch {
+      // 同上
+    }
+    this.#configSubscription = undefined
   }
 
   #failAll(reason: string): void {

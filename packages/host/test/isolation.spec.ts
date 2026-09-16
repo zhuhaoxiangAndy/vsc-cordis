@@ -98,6 +98,89 @@ class FakeHostApi implements IsolatedHostApi {
     this.outputs.delete(handle)
   }
 
+  // ————————————————————————————————— M4c：配置与状态栏项
+
+  /** 全限定键（`section.key`）→ 值。 */
+  readonly config = new Map<string, unknown>()
+  readonly statusBarItems = new Map<
+    number,
+    { pluginId: string; text: string; tooltip: string; command: string; visible: boolean }
+  >()
+  readonly disposedStatusBars: number[] = []
+  readonly configSubscriptions = { active: 0, disposed: 0 }
+  readonly #configListeners = new Set<() => void>()
+
+  /** 测试用：改配置值并触发推送（模拟用户在设置里改了值）。 */
+  setConfig(section: string, key: string, value: unknown): void {
+    this.config.set(`${section}.${key}`, value)
+    for (const listener of [...this.#configListeners]) listener()
+  }
+
+  async readConfiguration(
+    _pluginId: string,
+    section: string,
+    keys: readonly string[],
+  ): Promise<Readonly<Record<string, unknown>>> {
+    const values: Record<string, unknown> = {}
+    for (const key of keys) values[`${section}.${key}`] = this.config.get(`${section}.${key}`)
+    return values
+  }
+
+  onDidChangeConfiguration(
+    _pluginId: string,
+    section: string,
+    keys: readonly string[],
+    listener: (values: Readonly<Record<string, unknown>>) => void,
+  ): { dispose(): void } {
+    this.configSubscriptions.active += 1
+    const wrapped = (): void => {
+      const values: Record<string, unknown> = {}
+      for (const key of keys) values[`${section}.${key}`] = this.config.get(`${section}.${key}`)
+      listener(values)
+    }
+    this.#configListeners.add(wrapped)
+    return {
+      dispose: () => {
+        this.configSubscriptions.active -= 1
+        this.configSubscriptions.disposed += 1
+        this.#configListeners.delete(wrapped)
+      },
+    }
+  }
+
+  createStatusBarItem(pluginId: string, _alignment: number, _priority: number, initial: { text: string }): number {
+    const handle = this.#nextHandle++
+    this.statusBarItems.set(handle, { pluginId, text: initial.text, tooltip: '', command: '', visible: false })
+    return handle
+  }
+
+  updateStatusBarItem(
+    handle: number,
+    patch: {
+      text?: string
+      tooltip?: string
+      command?: string
+      color?: string
+      name?: string
+      accessibilityInformation?: unknown
+    },
+  ): void {
+    const item = this.statusBarItems.get(handle)
+    if (item === undefined) return
+    if (patch.text !== undefined) item.text = patch.text
+    if (patch.tooltip !== undefined) item.tooltip = patch.tooltip
+    if (patch.command !== undefined) item.command = patch.command
+  }
+
+  setStatusBarItemVisible(handle: number, visible: boolean): void {
+    const item = this.statusBarItems.get(handle)
+    if (item !== undefined) item.visible = visible
+  }
+
+  disposeStatusBarItem(handle: number): void {
+    if (this.statusBarItems.delete(handle)) this.disposedStatusBars.push(handle)
+  }
+
   workspaceFolders(): readonly SerializedWorkspaceFolder[] {
     return [{ name: 'fake', index: 0, uri: 'file:///fake', fsPath: '/fake' }]
   }
@@ -161,11 +244,16 @@ async function makeFixture(
       description: undefined,
       dependencies: {},
       provides: [],
+      configuration: (manifest.configuration ?? undefined) as
+        | { readonly section: string; readonly keys: readonly string[] }
+        | undefined,
       permissions: (full.permissions ?? []) as string[],
       trust: 'untrusted',
     },
   }
 }
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** 与生产环境一致地组装：真实 PluginHost + 真实隔离加载器。 */
 const createdHosts: PluginHost[] = []
@@ -401,8 +489,13 @@ test('隔离模式明确不支持的能力：响亮失败并说明原因，而�
 
   const { host } = await makeHost(hostApi)
   await assert.rejects(host.load(entry), (error: unknown) => {
-    assert.match(String(error), /M4c/)
-    assert.match(String(error), /事件订阅/)
+    const text = String(error)
+    assert.match(text, /事件订阅/)
+    // 断言的是**实质理由**而不是待办编号：这条能力缺的不是工程量，
+    // 而是"跨进程只能给纯数据，而类型上写的是带同步方法的 TextDocument"这个矛盾。
+    assert.match(text, /类型契约会撒谎/)
+    assert.match(text, /同步方法/)
+    assert.match(text, /ADR-0016/)
     return true
   })
 })
@@ -424,4 +517,209 @@ test('隔离插件：越权访问网络被 require 拦截（防误用，非强�
     assert.match(String(error), /防误用/)
     return true
   })
+})
+
+// ————————————————————————————————— M4c：配置快照与状态栏项
+
+test('M4c：隔离插件按声明同步读配置，配置变化由宿主推送过来（不是去问）', async () => {
+  const hostApi = new FakeHostApi()
+  hostApi.config.set('cfg-lab.greeting', 'hello-from-config')
+
+  const entry = await makeFixture(
+    'cfg-reader',
+    `module.exports = {
+       activate(ctx) {
+         const api = ctx.vscode
+         ctx.effect(
+           () => api.commands.registerCommand('cfg.snapshot', () =>
+             api.workspace.getConfiguration('cfg-lab').get('greeting', 'none')),
+           (d) => d.dispose(),
+           'cmd:snapshot',
+         )
+         ctx.effect(
+           () => api.commands.registerCommand('cfg.undeclared', () =>
+             api.workspace.getConfiguration('cfg-lab').get('not-declared', 'fallback')),
+           (d) => d.dispose(),
+           'cmd:undeclared',
+         )
+       },
+     }\n`,
+    {
+      permissions: ['vscode:commands.register', 'vscode:workspace.config.read'],
+      configuration: { section: 'cfg-lab', keys: ['greeting'] },
+    },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+
+    // get() 是**同步**的：在子进程里直接读本地快照，不需要等 RPC
+    assert.equal(await hostApi.executeCommand('cfg-reader', 'cfg.snapshot', []), 'hello-from-config')
+
+    // 改配置 → 宿主推送 → 缓存更新；注意命令是"执行时"才读的，所以这里能验证到推送生效
+    hostApi.setConfig('cfg-lab', 'greeting', 'updated-by-push')
+    await sleep(200)
+    assert.equal(await hostApi.executeCommand('cfg-reader', 'cfg.snapshot', []), 'updated-by-push')
+
+    // 未声明的键拿不到值，只能回落到默认值（并会告警一次）
+    assert.equal(await hostApi.executeCommand('cfg-reader', 'cfg.undeclared', []), 'fallback')
+    assert.ok(
+      hostApi.logs.some((log) => log.message.includes('未声明的配置键')),
+      '读未声明的键应当留下一条告警，而不是静默返回默认值',
+    )
+
+    assert.equal(hostApi.configSubscriptions.active, 1, '激活时应当建立一条配置订阅')
+  } finally {
+    await host.unload('cfg-reader')
+    await host.settle()
+  }
+
+  assert.equal(hostApi.configSubscriptions.active, 0, '卸载后不得残留配置订阅')
+  assert.equal(hostApi.configSubscriptions.disposed, 1)
+})
+
+test('M4c：隔离插件创建状态栏项——属性读回是同步的，变更会同步到宿主，卸载后 UI 被回收', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'statusbar',
+    `module.exports = {
+       activate(ctx) {
+         const api = ctx.vscode
+         const item = api.window.createStatusBarItem(1, 42)
+         item.text = '$(sync) ready'
+         item.tooltip = 'tooltip-text'
+         item.command = 'statusbar.run'
+         item.show()
+         ctx.effect(
+           () => api.commands.registerCommand('statusbar.readText', () => item.text),
+           (d) => d.dispose(),
+           'cmd:read',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:window.statusbar', 'vscode:commands.register'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  await host.load(entry)
+  await host.settle()
+
+  // 本地镜像：刚设置的属性必须**立刻**能读回（否则就是"类型同步、实际异步"的假接口）
+  assert.equal(await hostApi.executeCommand('statusbar', 'statusbar.readText', []), '$(sync) ready')
+
+  await sleep(200)
+  const handles = [...hostApi.statusBarItems.keys()]
+  assert.equal(handles.length, 1)
+  const item = hostApi.statusBarItems.get(handles[0] as number)
+  assert.equal(item?.text, '$(sync) ready', '属性变更应当已经到宿主')
+  assert.equal(item?.tooltip, 'tooltip-text')
+  assert.equal(item?.command, 'statusbar.run')
+  assert.equal(item?.visible, true, 'show() 应当已经生效')
+
+  await host.unload('statusbar')
+  await host.settle()
+  assert.deepEqual(hostApi.disposedStatusBars, handles, '卸载后状态栏项必须被回收，不能留下点不动的僵尸 UI')
+  assert.equal(hostApi.statusBarItems.size, 0)
+})
+
+test('M4c：状态栏项设置**未支持的属性**时响亮抛错，而不是静默无效', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'statusbar-unknown-prop',
+    `module.exports = {
+       activate(ctx) {
+         const item = ctx.vscode.window.createStatusBarItem()
+         item.backgroundColor = 'red'
+       },
+     }\n`,
+    { permissions: ['vscode:window.statusbar'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), (error: unknown) => {
+    const text = String(error)
+    // 普通对象对未知属性赋值是**静默接受**的（不改 UI 也不报错），Proxy 就是为了堵这个洞
+    assert.match(text, /不支持属性 "backgroundColor"/)
+    assert.match(text, /支持的属性：text/)
+    return true
+  })
+})
+
+test('M4c：状态栏项需要权限，未授权时激活失败', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'statusbar-no-perm',
+    `module.exports = {
+       activate(ctx) {
+         ctx.vscode.window.createStatusBarItem()
+       },
+     }\n`,
+    { permissions: [] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), (error: unknown) => {
+    assert.match(String(error), /未获得权限 vscode:window\.statusbar/)
+    return true
+  })
+})
+
+test('M4c：隔离模式下拒绝服务时的理由说的是真实原因（类型契约会撒谎），不是"还没做"', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'wants-service',
+    `module.exports = {
+       activate(ctx) {
+         ctx.use('clock')
+       },
+     }\n`,
+  )
+
+  const { host } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), (error: unknown) => {
+    const text = String(error)
+    assert.match(text, /进程内对象/)
+    assert.match(text, /Promise<Date>|带方法的/)
+    return true
+  })
+})
+
+test('M4c：未声明 configuration 的隔离插件读配置只拿默认值（并说明要声明）', async () => {
+  const hostApi = new FakeHostApi()
+  hostApi.config.set('cfg-lab.greeting', 'should-not-be-visible')
+
+  const entry = await makeFixture(
+    'cfg-undeclared-plugin',
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('cfg.read', () =>
+             ctx.vscode.workspace.getConfiguration('cfg-lab').get('greeting', 'default-value')),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register', 'vscode:workspace.config.read'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(
+      await hostApi.executeCommand('cfg-undeclared-plugin', 'cfg.read', []),
+      'default-value',
+      '没有声明 configuration 时宿主不会预取，子进程只能给默认值',
+    )
+    assert.ok(
+      hostApi.logs.some((log) => log.message.includes('未声明的配置键')),
+      '应当告警提示作者去 plugin.json 里声明',
+    )
+  } finally {
+    await host.unload('cfg-undeclared-plugin')
+    await host.settle()
+  }
 })
