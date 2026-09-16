@@ -18,6 +18,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output,
     extensionUri: context.extensionUri,
     globalStorageUri: context.globalStorageUri,
+    // engines 是强制检查，所以把自己声明的版本传进去；缺省回落到 '0.0.0'
+    // （此时任何 engines.vscordis 声明都会判不兼容 —— 宁可拒绝也不要静默跳过）。
+    hostVersion: typeof context.extension.packageJSON.version === 'string' ? context.extension.packageJSON.version : '0.0.0',
   })
 
   context.subscriptions.push(...runtime.registerCommands())

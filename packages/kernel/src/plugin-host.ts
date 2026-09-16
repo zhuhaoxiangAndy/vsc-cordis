@@ -8,9 +8,10 @@ import type {
 } from '@vscordis/sdk'
 import { createPluginContext } from './context.ts'
 import { EffectStack } from './effect-stack.ts'
-import { IsolationUnavailableError, PluginAlreadyLoadedError } from './errors.ts'
+import { IsolationUnavailableError, PluginAlreadyLoadedError, PluginEngineMismatchError } from './errors.ts'
 import type { HostPort, LoadedPluginModule, PluginEntry, PluginSource } from './ports.ts'
 import { ServiceRegistry, type ServiceChangeEvent } from './service-registry.ts'
+import { satisfies } from './semver-mini.ts'
 import { withTimeout } from './timing.ts'
 
 /**
@@ -71,6 +72,13 @@ export interface PluginHostOptions {
    * 而是整个宿主失去响应。超时不是为了让慢插件更快，而是为了让宿主**始终可恢复**。
    */
   readonly activationTimeoutMs?: number
+  /**
+   * 宿主 vscordis 自身的版本，用于强制 `plugin.json#engines.vscordis`。
+   * 不传 = 跳过这项检查（宿主运行时一定会传；测试里可以省略）。
+   */
+  readonly hostVersion?: string
+  /** 当前 VSCode 版本，用于强制 `plugin.json#engines.vscode`。不传 = 跳过。 */
+  readonly vscodeVersion?: string
   readonly onTransition?: (event: TransitionEvent) => void
 }
 
@@ -80,6 +88,8 @@ export class PluginHost {
   readonly #records = new Map<PluginId, PluginRecord>()
   readonly #disposeTimeoutMs: number
   readonly #activationTimeoutMs: number
+  readonly #hostVersion: string | undefined
+  readonly #vscodeVersion: string | undefined
   readonly #onTransition: ((event: TransitionEvent) => void) | undefined
   readonly #subscriptions: { dispose(): void }[] = []
   #queue: Promise<void> = Promise.resolve()
@@ -89,6 +99,8 @@ export class PluginHost {
     this.#port = options.port
     this.#disposeTimeoutMs = options.disposeTimeoutMs ?? 2_000
     this.#activationTimeoutMs = options.activationTimeoutMs ?? 15_000
+    this.#hostVersion = options.hostVersion
+    this.#vscodeVersion = options.vscodeVersion
     this.#onTransition = options.onTransition
     this.#registry =
       options.registry ??
@@ -167,7 +179,18 @@ export class PluginHost {
         throw error
       }
 
-      await this.#activate(record, 'load')
+      try {
+        await this.#activate(record, 'load')
+      } catch (error) {
+        // 兜住"#activate 内部 try 块之外"抛出的失败（例如引擎不兼容）。
+        // 没有这一层的话，记录会停在 idle —— 状态面板会把它显示成"从未加载过"而不是"加载失败"，
+        // 而任何加载失败都必须留下可诊断的 failed 状态。
+        if (record.state === 'idle') {
+          record.error = error
+          this.#setState(record, 'failed', `load 失败：${describe(error)}`)
+        }
+        throw error
+      }
       return this.#view(record)
     })
   }
@@ -221,6 +244,9 @@ export class PluginHost {
 
   async #activate(record: PluginRecord, reason: string): Promise<void> {
     const manifest = record.entry.manifest
+
+    // 引擎兼容性放在最前面：不兼容的插件连模块都不该被加载。
+    this.#assertEnginesCompatible(record)
 
     // 第一道判定：只看清单的**便宜预检** —— 缺依赖就连模块都不加载（不让模块级代码白跑一遍）。
     const preMissing = this.#missingDependencies(record)
@@ -403,6 +429,45 @@ export class PluginHost {
    * - `plugin.json#dependencies`（**权威**：能在模块求值之前拦下）；
    * - `CordisPlugin.inject`（cordis 风格；必须模块已加载才能读到，缺省范围 `*`）。
    */
+  /**
+   * 强制 `plugin.json#engines`（ADR-0017）。
+   *
+   * 为什么值得单独写一段代码：`engines` 字段以前**被校验器静默丢弃** ——
+   * 作者写了等于没写，而且没有任何反馈。这与 `CordisPlugin.inject`、`provides`
+   * 是同一类"声明了却不生效"的陷阱，本项目对它的处理原则是：**要么强制，要么响亮告警**。
+   *
+   * 版本号先做宽松归一化（去掉 `-prerelease` 与 `+build` 后缀）：
+   * 我们的 `semver-mini` 只认 `x.y.z`，而宿主/编辑器版本常带后缀，
+   * 直接比较会让一个 `>=0.1.0` 的声明在 `0.1.0-beta` 上假失败。
+   */
+  #assertEnginesCompatible(record: PluginRecord): void {
+    const engines = record.entry.manifest.engines
+    if (engines === undefined) return
+
+    const problems: string[] = []
+    const checks: readonly { key: 'vscordis' | 'vscode'; range: string | undefined; actual: string | undefined }[] = [
+      { key: 'vscordis', range: engines.vscordis, actual: this.#hostVersion },
+      { key: 'vscode', range: engines.vscode, actual: this.#vscodeVersion },
+    ]
+
+    for (const check of checks) {
+      if (check.range === undefined) continue
+      if (check.actual === undefined) {
+        this.#port.log('debug', `插件声明了 engines.${check.key}，但调用方未提供对应版本，跳过检查`, {
+          plugin: record.entry.manifest.id,
+        })
+        continue
+      }
+      if (!satisfies(normalizeVersion(check.actual), check.range)) {
+        problems.push(`engines.${check.key} = ${check.range}（实际 ${check.actual}）`)
+      }
+    }
+
+    if (problems.length > 0) {
+      throw new PluginEngineMismatchError(record.entry.manifest.id, problems)
+    }
+  }
+
   #declaredDependencies(record: PluginRecord): Record<string, string> {
     const declared: Record<string, string> = { ...record.entry.manifest.dependencies }
     for (const name of record.loaded?.plugin.inject ?? []) {
@@ -488,6 +553,11 @@ export class PluginHost {
 export function describe(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`
   return String(error)
+}
+
+/** 去掉 `-prerelease` / `+build` 后缀：`semver-mini` 只认 `x.y.z`（见 #assertEnginesCompatible）。 */
+function normalizeVersion(version: string): string {
+  return version.trim().split(/[-+]/)[0] ?? version
 }
 
 function createPluginLogger(id: PluginId, port: HostPort): Logger {

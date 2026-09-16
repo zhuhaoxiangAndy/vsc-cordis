@@ -94,3 +94,24 @@ export class InvalidManifestError extends VscordisError {
     this.errors = errors
   }
 }
+
+/**
+ * 插件的 `engines` 声明与当前运行环境不兼容（ADR-0017）。
+ *
+ * 这是**强制**检查而不是提示：`engines` 以前被校验器静默丢弃，
+ * 于是作者写了等于没写 —— 正是本项目一直在消除的那类陷阱。
+ */
+export class PluginEngineMismatchError extends VscordisError {
+  readonly pluginId: string
+  readonly problems: readonly string[]
+
+  constructor(pluginId: string, problems: readonly string[]) {
+    super(
+      `插件 "${pluginId}" 与当前运行环境不兼容：${problems.join('；')}。` +
+        'engines 是强制检查，请升级宿主扩展或改用兼容版本的插件。',
+    )
+    this.name = 'PluginEngineMismatchError'
+    this.pluginId = pluginId
+    this.problems = problems
+  }
+}

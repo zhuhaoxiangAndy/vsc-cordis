@@ -26,6 +26,13 @@ export interface NormalizedManifest {
    * 这里的"没有"天然就是 undefined，硬造一个空对象反而会掩盖意图。
    */
   readonly configuration?: { readonly section: string; readonly keys: readonly string[] }
+  /**
+   * 声明兼容的引擎版本。
+   *
+   * ⚠️ 这两个字段以前**被静默丢弃**（校验器根本没读它们）—— 又是一个"声明了却不生效"的陷阱。
+   * 现在：结构在加载时校验，兼容性在激活前由 `PluginHost` 强制（见 ADR-0017）。
+   */
+  readonly engines?: { readonly vscordis?: string; readonly vscode?: string }
   readonly permissions: readonly string[]
   readonly trust: PluginTrust
 }
@@ -91,6 +98,8 @@ export function validateManifest(raw: unknown): ManifestValidation {
 
   const configuration = readConfiguration(record, errors)
 
+  const engines = readEngines(record, errors)
+
   const permissions = readPermissions(record, errors)
 
   const trust = readTrust(record, errors)
@@ -108,6 +117,7 @@ export function validateManifest(raw: unknown): ManifestValidation {
     dependencies,
     provides,
     configuration,
+    engines,
     permissions,
     trust,
   }
@@ -213,6 +223,30 @@ function readConfiguration(
     return undefined
   }
   return { section, keys }
+}
+
+function readEngines(
+  record: Record<string, unknown>,
+  errors: string[],
+): { readonly vscordis?: string; readonly vscode?: string } | undefined {
+  const value = record.engines
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    errors.push('engines 应为 { vscordis?, vscode? } 对象')
+    return undefined
+  }
+  const entry = value as Record<string, unknown>
+  const result: { vscordis?: string; vscode?: string } = {}
+  for (const key of ['vscordis', 'vscode'] as const) {
+    const raw = entry[key]
+    if (raw === undefined) continue
+    if (typeof raw !== 'string' || !isValidRange(raw)) {
+      errors.push(`engines.${key} 的版本范围非法：${String(raw)}（仅支持 * / 1.2.3 / ^1.2.3 / >=1.2.3）`)
+      continue
+    }
+    result[key] = raw
+  }
+  return Object.keys(result).length === 0 ? undefined : result
 }
 
 function readPermissions(record: Record<string, unknown>, errors: string[]): string[] {

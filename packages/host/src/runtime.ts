@@ -16,6 +16,8 @@ export interface RuntimeOptions {
   readonly extensionUri: vscode.Uri
   /** 用于解析 `${workspaceFolder}` 与默认插件根目录。 */
   readonly globalStorageUri: vscode.Uri
+  /** 宿主 vscordis 自身的版本，用于强制插件的 `engines.vscordis`（ADR-0017）。 */
+  readonly hostVersion: string
   readonly supportsIsolation?: boolean
 }
 

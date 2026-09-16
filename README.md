@@ -35,7 +35,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 141 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 150 项测试 + 构建 + 产物冒烟
 ```
 
 开发时开两个进程：

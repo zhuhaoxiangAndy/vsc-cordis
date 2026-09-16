@@ -30,6 +30,7 @@ export {
   IsolationUnavailableError,
   PermissionDeniedError,
   PluginAlreadyLoadedError,
+  PluginEngineMismatchError,
   ServiceConflictError,
   ServiceUnavailableError,
   ServiceVersionMismatchError,
