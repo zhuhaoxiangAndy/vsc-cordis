@@ -8,7 +8,7 @@ import { PluginHost, type HostPort, type PluginEntry } from '@vscordis/kernel'
 import type { LogLevel, Permission, PluginVscodeApi } from '@vscordis/sdk'
 import { IsolatedPluginLoader, type IsolatedHostApi } from '../src/isolation/isolated-loader.ts'
 import { buildExecArgv } from '../src/isolation/permissions.ts'
-import type { SerializedWorkspaceFolder } from '../src/isolation/protocol.ts'
+import type { SerializedSaveEvent, SerializedWorkspaceFolder } from '../src/isolation/protocol.ts'
 
 /**
  * M4b 隔离的端到端测试：**真实子进程 + 真实 IPC + 真实 --permission 标志**。
@@ -179,6 +179,50 @@ class FakeHostApi implements IsolatedHostApi {
 
   disposeStatusBarItem(handle: number): void {
     if (this.statusBarItems.delete(handle)) this.disposedStatusBars.push(handle)
+  }
+
+  // ————————————————————————————————— 事件订阅（ADR-0018）
+
+  readonly saveSubscriptions = { active: 0, disposed: 0 }
+  readonly #saveForwarders = new Set<(payload: SerializedSaveEvent) => void>()
+  readonly documents = new Map<number, string>()
+  #nextDocumentHandle = 1
+
+  /** 测试用：模拟一次"文档已保存"。 */
+  emitSave(options: { uri?: string; text?: string } = {}): number {
+    const handle = this.#nextDocumentHandle++
+    const text = options.text ?? 'saved content'
+    const uri = options.uri ?? 'file:///fake/doc.ts'
+    this.documents.set(handle, text)
+    const payload: SerializedSaveEvent = {
+      uri,
+      // 与真实 Uri 一致：fsPath 由 uri 推导，而不是各写各的（否则测试会拿到自相矛盾的数据）
+      fsPath: uri.replace(/^file:\/\//, ''),
+      languageId: 'typescript',
+      lineCount: text.split('\n').length,
+      version: 7,
+      documentHandle: handle,
+    }
+    for (const forward of [...this.#saveForwarders]) forward(payload)
+    return handle
+  }
+
+  subscribeSaveEvents(_pluginId: string, forward: (payload: SerializedSaveEvent) => void): { dispose(): void } {
+    this.saveSubscriptions.active += 1
+    this.#saveForwarders.add(forward)
+    return {
+      dispose: () => {
+        this.saveSubscriptions.active -= 1
+        this.saveSubscriptions.disposed += 1
+        this.#saveForwarders.delete(forward)
+      },
+    }
+  }
+
+  async readDocumentText(_pluginId: string, handle: number): Promise<string> {
+    const text = this.documents.get(handle)
+    if (text === undefined) throw new Error(`文档句柄 ${handle} 已过期`)
+    return text
   }
 
   workspaceFolders(): readonly SerializedWorkspaceFolder[] {
@@ -490,12 +534,11 @@ test('隔离模式明确不支持的能力：响亮失败并说明原因，而�
   const { host } = await makeHost(hostApi)
   await assert.rejects(host.load(entry), (error: unknown) => {
     const text = String(error)
-    assert.match(text, /事件订阅/)
-    // 断言的是**实质理由**而不是待办编号：这条能力缺的不是工程量，
-    // 而是"跨进程只能给纯数据，而类型上写的是带同步方法的 TextDocument"这个矛盾。
-    assert.match(text, /类型契约会撒谎/)
+    assert.match(text, /`ctx\.vscode\.workspace\.onDidSaveTextDocument` 在隔离模式下不可用/)
+    // 断言里必须包含**替代路径**：只告诉用户"不行"而不告诉"那该怎么办"是半个答案
+    assert.match(text, /ctx\.async\.onDidSaveTextDocument/)
     assert.match(text, /同步方法/)
-    assert.match(text, /ADR-0016/)
+    assert.match(text, /ADR-0018/)
     return true
   })
 })
@@ -645,6 +688,112 @@ test('M4c：状态栏项设置**未支持的属性**时响亮抛错，而不是�
     assert.match(text, /支持的属性：text/)
     return true
   })
+})
+
+test('M4c/0018：隔离插件通过 ctx.async 订阅保存事件，拿到纯数据 + 可 await 的 getText', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'events-plugin',
+    `module.exports = {
+       activate: async (ctx) => {
+         const api = ctx.vscode
+         let last = 'none'
+         const subscription = await ctx.async.onDidSaveTextDocument(async (document) => {
+           // 正文按需跨进程取：这是**显式异步**的，不是"看起来同步"的代理
+           const text = await document.getText()
+           last = [document.uri, document.fsPath, document.languageId, document.lineCount, document.version, text].join('|')
+         })
+         ctx.effect(() => subscription, (d) => d.dispose(), 'async:save')
+         ctx.effect(
+           () => api.commands.registerCommand('events.last', () => last),
+           (d) => d.dispose(),
+           'cmd:last',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register', 'vscode:workspace.read'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(hostApi.saveSubscriptions.active, 1, '激活时应当在宿主侧建立订阅')
+
+    hostApi.emitSave({ uri: 'file:///w/x.ts', text: 'hello world' })
+    await sleep(250)
+
+    assert.equal(
+      await hostApi.executeCommand('events-plugin', 'events.last', []),
+      'file:///w/x.ts|/w/x.ts|typescript|1|7|hello world',
+      '事件应当被转发到子进程，且 getText() 能按句柄取回正文',
+    )
+  } finally {
+    await host.unload('events-plugin')
+    await host.settle()
+  }
+
+  assert.equal(hostApi.saveSubscriptions.active, 0, '卸载后不得残留宿主侧订阅')
+  assert.equal(hostApi.saveSubscriptions.disposed, 1)
+})
+
+test('M4c/0018：隔离插件订阅保存事件需要 vscode:workspace.read 权限', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'events-no-perm',
+    `module.exports = {
+       activate: async (ctx) => {
+         await ctx.async.onDidSaveTextDocument(() => undefined)
+       },
+     }\n`,
+    { permissions: [] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), (error: unknown) => {
+    // 注意权限名外面有引号（PermissionDeniedError 的格式），正则要跟着它
+    assert.match(String(error), /未获得权限 "vscode:workspace\.read"/)
+    return true
+  })
+  assert.equal(hostApi.saveSubscriptions.active, 0, '被拒绝的订阅不该在宿主侧留下监听器')
+})
+
+test('M4c/0018：点号版本（ctx.vscode 上的同步 API）与 ctx.async 是两回事，不会互相污染', async () => {
+  const hostApi = new FakeHostApi()
+  // 同时用两种入口：同步那个应当抛错（并给出替代路径），异步那个应当正常工作
+  const entry = await makeFixture(
+    'both-apis',
+    `module.exports = {
+       activate: async (ctx) => {
+         let syncError = 'none'
+         try {
+           ctx.vscode.workspace.onDidSaveTextDocument(() => undefined)
+         } catch (error) {
+           syncError = String(error && error.message ? error.message : error)
+         }
+         const subscription = await ctx.async.onDidSaveTextDocument(() => undefined)
+         ctx.effect(() => subscription, (d) => d.dispose(), 'async:save')
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('both.syncError', () => syncError),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register', 'vscode:workspace.read'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(host.view('both-apis')?.state, 'active')
+    const message = String(await hostApi.executeCommand('both-apis', 'both.syncError', []))
+    assert.match(message, /ctx\.async\.onDidSaveTextDocument/)
+  } finally {
+    await host.unload('both-apis')
+    await host.settle()
+  }
 })
 
 test('M4c：状态栏项需要权限，未授权时激活失败', async () => {

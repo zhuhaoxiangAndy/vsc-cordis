@@ -10,6 +10,8 @@ export type { LogLevel, Logger } from './logger.ts'
 export type { PluginManifest, PluginTrust } from './manifest.ts'
 
 export type {
+  AsyncApi,
+  AsyncTextDocument,
   DependencyEdgeView,
   DependencyGraphSnapshot,
   DependencyKind,

@@ -28,6 +28,8 @@ export class FakeHostPort implements HostPort {
   readonly moduleLoads: PluginId[] = []
   readonly moduleReleases: PluginId[] = []
   readonly apiCalls: string[] = []
+  /** 已注册的"文档保存"监听器（用于测试 ctx.async 的同进程实现）。 */
+  readonly saveListeners = new Set<(document: unknown) => void>()
   readonly factories = new Map<PluginId, () => CordisPlugin>()
   /** 让测试可以模拟"模块加载失败"或"activate 卡住"。 */
   loadDelayMs = 0
@@ -101,7 +103,15 @@ export class FakeHostPort implements HostPort {
       workspace: {
         workspaceFolders: undefined,
         getConfiguration: () => ({ get: (): undefined => undefined }),
-        onDidSaveTextDocument: () => ({ dispose(): void {} }),
+        onDidSaveTextDocument: (listener: (document: never) => unknown) => {
+          const registered = listener as (document: unknown) => void
+          port.saveListeners.add(registered)
+          return {
+            dispose: (): void => {
+              port.saveListeners.delete(registered)
+            },
+          }
+        },
       },
       Uri: class {},
       Disposable: class {},
@@ -109,6 +119,19 @@ export class FakeHostPort implements HostPort {
     }
 
     return api as unknown as PluginVscodeApi
+  }
+
+  /** 测试用：模拟一次文档保存，构造一个"形似 TextDocument"的对象（只有 ctx.async 会用到的那几个成员）。 */
+  emitSave(options: { uri?: string; languageId?: string; lineCount?: number; version?: number; text?: string } = {}): void {
+    const uriString = options.uri ?? 'file:///fake/doc.ts'
+    const document = {
+      uri: { toString: () => uriString, fsPath: uriString.replace('file://', '') },
+      languageId: options.languageId ?? 'plaintext',
+      lineCount: options.lineCount ?? 1,
+      version: options.version ?? 1,
+      getText: () => options.text ?? '',
+    }
+    for (const listener of [...this.saveListeners]) listener(document)
   }
 
   log(level: LogLevel, message: string, meta?: Readonly<Record<string, unknown>>): void {

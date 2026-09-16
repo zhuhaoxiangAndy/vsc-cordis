@@ -49,6 +49,29 @@ export function createPluginContext(deps: PluginContextDeps): PluginContext {
     permissions: new Set<Permission>(manifest.permissions as readonly Permission[]),
     vscode,
 
+    /**
+     * 显式异步面（ADR-0018）。同进程实现：把真实的 `TextDocument` 适配成
+     * `AsyncTextDocument` 的形状（纯数据 + 异步 `getText()`）。
+     * 隔离模式在子进程里实现同一签名 —— 于是插件代码不需要按模式分支。
+     */
+    async: {
+      onDidSaveTextDocument: async (listener) => {
+        const disposable = vscode.workspace.onDidSaveTextDocument((document) => {
+          listener({
+            uri: document.uri.toString(),
+            fsPath: document.uri.fsPath,
+            languageId: document.languageId,
+            lineCount: document.lineCount,
+            version: document.version,
+            getText: async () => document.getText(),
+          })
+        })
+        // 走 EffectStack：插件即使忘了 dispose，卸载时也会被回收。
+        effects.add(() => disposable.dispose(), 'async:onDidSaveTextDocument')
+        return disposable
+      },
+    },
+
     effect: (register, dispose, label) => effects.effect(register, dispose, label),
     effectAsync: (register, dispose, label) => effects.effectAsync(register, dispose, label),
     scope: (label?: string) => createPluginContext({ ...deps, effects: effects.scope(label) }),

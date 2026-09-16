@@ -16,7 +16,7 @@ import type { CordisPlugin } from '@vscordis/sdk'
 export default {
   name: 'isolated-hello',
 
-  activate(ctx) {
+  async activate(ctx) {
     const api = ctx.vscode
 
     const channel = api.window.createOutputChannel('Isolated Hello')
@@ -29,6 +29,14 @@ export default {
     status.show()
 
     ctx.effect(() => status, (item) => item.dispose(), 'status:isolated-hello')
+
+    // 显式异步面（ADR-0018）：同进程与隔离模式**签名一致**，所以这里不需要任何分支。
+    // 正文按需跨进程取（句柄），不随事件整篇传输。
+    const subscription = await ctx.async.onDidSaveTextDocument(async (document) => {
+      const text = await document.getText()
+      channel.appendLine(`保存：${document.fsPath}（${document.lineCount} 行，${text.length} 字符）`)
+    })
+    ctx.effect(() => subscription, (disposable) => disposable.dispose(), 'async:onDidSaveTextDocument')
 
     ctx.effect(
       () => api.commands.registerCommand('isolated-hello.greet', (name?: unknown) => {

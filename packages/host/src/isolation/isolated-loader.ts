@@ -8,6 +8,7 @@ import {
   errorToWire,
   type ChildToHost,
   type HostToChild,
+  type SerializedSaveEvent,
   type SerializedWorkspaceFolder,
 } from './protocol.ts'
 
@@ -73,6 +74,15 @@ export interface IsolatedHostApi {
   ): void
   setStatusBarItemVisible(handle: number, visible: boolean): void
   disposeStatusBarItem(handle: number): void
+  /**
+   * 订阅真实的文档保存事件（ADR-0018）。
+   *
+   * 宿主负责把 `TextDocument` 转换成纯数据 + **文档句柄**：正文不随事件一起传
+   * （大文件每次保存都整篇走 IPC 不可接受），而是等子进程按需用句柄来取。
+   */
+  subscribeSaveEvents(pluginId: string, forward: (payload: SerializedSaveEvent) => void): Disposable
+  /** 按句柄读正文。句柄**有生命周期**且**按插件归属校验**；过期或越权都会给出明确错误。 */
+  readDocumentText(pluginId: string, handle: number): Promise<string>
   workspaceFolders(): readonly SerializedWorkspaceFolder[]
   log(pluginId: string, level: LogLevel, message: string): void
 }
@@ -235,6 +245,8 @@ class IsolatedSession {
   readonly #commandHandles = new Map<string, Disposable>()
   readonly #outputHandles = new Set<number>()
   readonly #statusBarHandles = new Set<number>()
+  readonly #eventSubscriptions = new Map<number, Disposable>()
+  #eventSeq = 0
   #configSubscription: Disposable | undefined
   #child: ChildProcess | undefined
   #exited: Promise<void> = Promise.resolve()
@@ -534,6 +546,29 @@ class IsolatedSession {
           this.#reply(call.id, undefined)
           break
         }
+        case 'events.onDidSaveTextDocument': {
+          // 事件订阅读的是工作区内容，所以归到 workspace.read 权限下。
+          require('vscode:workspace.read')
+          const subscriptionId = ++this.#eventSeq
+          const disposable = this.#options.hostApi.subscribeSaveEvents(pluginId, (payload) => {
+            this.#send({ kind: 'event', subscription: subscriptionId, payload })
+          })
+          this.#eventSubscriptions.set(subscriptionId, disposable)
+          this.#reply(call.id, { subscription: subscriptionId })
+          break
+        }
+        case 'events.unsubscribe': {
+          const subscriptionId = Number(call.args[0])
+          this.#eventSubscriptions.get(subscriptionId)?.dispose()
+          this.#eventSubscriptions.delete(subscriptionId)
+          this.#reply(call.id, undefined)
+          break
+        }
+        case 'document.getText': {
+          require('vscode:workspace.read')
+          this.#reply(call.id, await this.#options.hostApi.readDocumentText(pluginId, Number(call.args[0])))
+          break
+        }
         case 'log': {
           this.#options.hostApi.log(pluginId, 'info', String(call.args[0] ?? ''))
           this.#reply(call.id, undefined)
@@ -585,6 +620,16 @@ class IsolatedSession {
       }
     }
     this.#statusBarHandles.clear()
+
+    // 事件订阅同理：子进程没了而宿主还在监听文档保存，就是白跑 + 事件发进黑洞。
+    for (const [, subscription] of this.#eventSubscriptions) {
+      try {
+        subscription.dispose()
+      } catch {
+        // 同上
+      }
+    }
+    this.#eventSubscriptions.clear()
 
     // 配置订阅同理：不摘掉的话，插件卸载后宿主还在为一个不存在的进程准备推送。
     try {

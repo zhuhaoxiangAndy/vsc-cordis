@@ -35,7 +35,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 150 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 161 项测试 + 构建 + 产物冒烟
 ```
 
 开发时开两个进程：
@@ -97,14 +97,20 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 端到端验证：**16 项测试**跑的是**真实子进程 + 真实 IPC + 真实 `--permission`**。
 示例插件 `plugins/isolated-hello`，手动验收见 `docs/acceptance-m4b.md`。
 
-刻意收窄的边界 —— 两个 ❌ 是**设计边界而非待办**：隔离插件不能用服务（`ctx.use`/`provide`），
-也不能订阅 `onDidSaveTextDocument`。理由是**类型契约会撒谎**：服务是带同步方法的进程内对象、
-事件回调参数 `TextDocument` 也带同步方法，跨进程只能给纯数据或 Promise，
-于是"同一份插件代码两边一样"这个前提就不成立了。详见 `docs/adr/0016-isolation-capability-tradeoffs.md`。
+隔离模式**支持**：
 
-隔离模式**支持**配置读取（`plugin.json` 里声明 `configuration.keys`，宿主预取快照 + 变化推送，
-插件侧 `get()` 保持同步）与状态栏项（本地镜像 + 串行 RPC，未支持的属性响亮抛错）。
-`net` 权限是**约定**而非强制（Node 没有网络开关）。详见 `docs/adr/0013-isolation-backend.md`。
+| 能力 | 怎么用 |
+| --- | --- |
+| 配置读取 | `plugin.json` 声明 `configuration.keys` → 宿主预取快照 + 变化推送，插件侧 `get()` 保持**同步且不陈旧** |
+| 状态栏项 | 本地镜像 + 串行 RPC（读属性同步；未支持的属性**响亮抛错**） |
+| 文档保存事件 | `ctx.async.onDidSaveTextDocument` —— **两种模式签名一致**的显式异步面（正文按需取，见 ADR-0018） |
+
+**唯一仍然是 ❌ 的是跨进程服务**（`ctx.use`/`provide`）。它不是"还没做"，而是需要一个
+**方法级 RPC 协议**（方法发现 + 序列化契约 + 调用失败传播 + 提供者退出时的在途调用处理），
+与"转发一个事件"不是一个量级；且没有它并不影响隔离方案成立。需要服务协作的插件用
+`trust: trusted`（ADR-0003 已说明它只防误用、不防恶意）。
+`net` 权限是**约定**而非强制（Node 没有网络开关）。
+详见 `docs/adr/0016-isolation-capability-tradeoffs.md` 与 `docs/adr/0018-explicit-async-surface.md`。
 
 ## CLI（M5）
 

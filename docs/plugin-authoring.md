@@ -50,6 +50,7 @@ export default {
 | `ctx.tryUse(name)` | 软依赖：缺失返回 `undefined` | **不级联**（可选增强用它，别用 `use` 兜底） |
 | `ctx.provide(name, value, { version })` | 提供服务 | 返回 `Disposable`；默认 `exclusive`，同名第二个提供者抛错 |
 | `ctx.signal` | 卸载信号 | **长任务必须监听它**：宿主只能发信号，无法强制中断你的 Promise |
+| `ctx.async.onDidSaveTextDocument` | 订阅文档保存 | **两种模式签名一致**的显式异步面（返回 `Promise<Disposable>`，正文用 `await doc.getText()`）。不需要模式分支 —— 见下方 |
 | `ctx.vscode` | 受控 VSCode API | 见第 4 节；**不是**完整的 `vscode` |
 | `ctx.log` | 带插件 id 前缀的日志 | 会进 `VSCordis` 输出通道 |
 
@@ -80,7 +81,7 @@ export default {
 | 服务（`ctx.use` / `provide`） | ✅ | ❌ 抛错（服务是**带方法的进程内对象**，代理会让 `now()` 从 `Date` 变成 `Promise<Date>`） |
 | `getConfiguration` | ✅ | ✅ **按声明预取**：在 `plugin.json` 里写 `configuration`，宿主预取并在配置变化时推送 |
 | `createStatusBarItem` | ✅ | ✅ 本地镜像 + 串行 RPC（读属性是同步的；未支持的属性会**响亮抛错**） |
-| `onDidSaveTextDocument` | ✅ | ❌ 抛错（回调参数 `TextDocument` 带同步方法，跨进程只能给纯数据 —— 类型契约会撒谎） |
+| `onDidSaveTextDocument`（`ctx.vscode.*`，同步签名） | ✅ | ❌ 抛错 —— 但**错误信息会告诉你改用 `ctx.async`** |
 | 命令 handler | 同步/异步都可以 | 宿主会**反向调用**你的 handler 并把结果回传 |
 | 适合 | 自研、团队内部、需要服务协作的插件 | 第三方、需要真隔离的插件 |
 
@@ -106,8 +107,26 @@ const greeting = ctx.vscode.workspace.getConfiguration('my-plugin').get('greetin
   插件无法贡献设置项，所以你的配置键目前只能手写进 `settings.json`
   （VSCode 会提示"未知配置设置"，但值能正常读到）。要让它出现在设置 UI 里需要宿主代插件声明，暂未实现。
 
-### 隔离模式写状态栏项
+### 事件订阅：用 `ctx.async`（两种模式同一份代码）
 
+```ts
+const subscription = await ctx.async.onDidSaveTextDocument(async (doc) => {
+  const text = await doc.getText()                       // 显式异步
+  ctx.log.info(`保存：${doc.fsPath}（${doc.lineCount} 行，${text.length} 字符）`)
+})
+ctx.effect(() => subscription, (d) => d.dispose(), 'async:save')
+```
+
+- **为什么单独一个面**：`ctx.vscode.workspace.onDidSaveTextDocument` 的回调参数是 `TextDocument`，
+  带 `getText()` 这类**同步方法**；隔离模式下正文只能跨进程按需取，
+  所以那份 API 在隔离模式下**抛错**（错误信息会指向这里）。
+- 这个面在**两种模式下签名一致**，你的插件代码不需要 `if (隔离) ... else ...`。
+- 需要 `vscode:workspace.read` 权限。
+- 正文**按需取**：事件载荷是纯数据 + 句柄，宿主不会把整篇文档塞进 IPC。
+  句柄有生命周期（每个插件保留最近 64 个），过期后再 `getText()` 会抛**明确错误**（不是空串）。
+  所以请在事件回调里**及时**读正文。
+
+### 隔离模式写状态栏项
 ```ts
 const item = ctx.vscode.window.createStatusBarItem(1, 100)   // 需要 vscode:window.statusbar
 item.text = '$(shield) ready'

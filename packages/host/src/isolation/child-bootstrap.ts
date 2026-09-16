@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
 import { EffectStack } from '@vscordis/kernel'
-import { resolvePluginExport, type CordisPlugin, type Disposable, type LogLevel, type Permission, type PluginContext, type PluginVscodeApi } from '@vscordis/sdk'
+import { resolvePluginExport, type AsyncTextDocument, type CordisPlugin, type Disposable, type LogLevel, type Permission, type PluginContext, type PluginVscodeApi } from '@vscordis/sdk'
 import {
   PROTOCOL_VERSION,
   errorToWire,
@@ -38,6 +38,8 @@ interface PendingCall {
 
 const pendingCalls = new Map<number, PendingCall>()
 const commandHandlers = new Map<string, (...args: unknown[]) => unknown>()
+/** 订阅句柄 → 监听器。宿主转发事件时按句柄派发。 */
+const eventListeners = new Map<number, (document: AsyncTextDocument) => void>()
 let callSeq = 0
 
 function send(message: ChildToHost): void {
@@ -562,6 +564,21 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
     permissions: new Set<Permission>(permissionList(activation.permissions)),
     vscode: buildVscodeProxy(activation.permissions),
 
+    /**
+     * 显式异步面（ADR-0018）：与同进程实现**签名完全一致**，
+     * 于是插件代码不需要按模式分支，也不会撞上"类型同步、实际异步"。
+     */
+    async: {
+      onDidSaveTextDocument: async (listener) => {
+        const opened = (await callHost('events.onDidSaveTextDocument', [])) as { subscription: number }
+        eventListeners.set(opened.subscription, listener)
+        return new LocalDisposable(() => {
+          eventListeners.delete(opened.subscription)
+          void callHost('events.unsubscribe', [opened.subscription]).catch(() => undefined)
+        })
+      },
+    },
+
     effect: (register, dispose, label) => stack.effect(register, dispose, label),
     effectAsync: (register, dispose, label) => stack.effectAsync(register, dispose, label),
     scope: (label?: string) => buildContext(activation, stack.scope(label)),
@@ -675,6 +692,21 @@ process.on('message', (raw: unknown) => {
       // 增量合并：宿主只推变化的键，未提到的键保留原值。
       configSnapshot = { ...configSnapshot, ...message.values }
       break
+    case 'event': {
+      const listener = eventListeners.get(message.subscription)
+      if (listener === undefined) break
+      const payload = message.payload
+      // 正文**按需**取：句柄有生命周期，过期后会得到一条明确的错误（而不是空串）。
+      listener({
+        uri: payload.uri,
+        fsPath: payload.fsPath,
+        languageId: payload.languageId,
+        lineCount: payload.lineCount,
+        version: payload.version,
+        getText: () => callHost('document.getText', [payload.documentHandle]) as Promise<string>,
+      })
+      break
+    }
     case 'invoke':
       invokeCommand(message.requestId, message.command, message.args)
       break

@@ -182,3 +182,30 @@ test('sign：目标不是插件目录时报错', async () => {
   assert.equal(result.code, 1)
   assert.match(result.err, /找不到插件/)
 })
+
+// ————————————————————————————————— dev：只测前置检查
+
+/**
+ * `dev` 是长驻进程（esbuild watch），完整端到端需要 spawn + 信号，
+ * 收益不抵复杂度。但它**在启动监听之前**的前置检查是纯逻辑且必须准确 ——
+ * 一个"什么也没构建就静静挂在那里"的 watch 是最难排查的形态。
+ */
+test('dev：目录下没有可构建的插件 → 退出码 1 且说明需要什么', async () => {
+  const root = path.join(scratch, `dev-empty-${runId}`)
+  await mkdir(root, { recursive: true })
+  const result = await run(['dev', '--root', root])
+
+  assert.equal(result.code, 1)
+  assert.match(result.err, /没有找到可构建的插件/)
+  assert.match(result.err, /src\/index\.ts/, '必须说清它到底在找什么，而不是只说"没找到"')
+})
+
+test('dev：只有 dist 没有 src 的插件同样被判为不可构建', async () => {
+  const root = path.join(scratch, `dev-no-src-${runId}`)
+  // writePlugin 只写 plugin.json 与 dist/index.cjs，不写 src/ —— 正是"已构建但没源码"的形态
+  await writePlugin(root, 'built-only', {})
+
+  const result = await run(['dev', '--root', root])
+  assert.equal(result.code, 1)
+  assert.match(result.err, /没有找到可构建的插件/)
+})

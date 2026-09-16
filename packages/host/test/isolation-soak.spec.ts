@@ -86,6 +86,14 @@ class SilentHostApi implements IsolatedHostApi {
     return {}
   }
 
+  subscribeSaveEvents(): { dispose(): void } {
+    return { dispose: () => undefined }
+  }
+
+  async readDocumentText(): Promise<string> {
+    return ''
+  }
+
   onDidChangeConfiguration(): { dispose(): void } {
     return { dispose: () => undefined }
   }

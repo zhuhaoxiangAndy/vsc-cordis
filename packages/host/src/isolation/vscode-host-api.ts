@@ -2,7 +2,16 @@ import * as vscode from 'vscode'
 import { PermissionDeniedError } from '@vscordis/kernel'
 import type { Disposable, LogLevel, Permission } from '@vscordis/sdk'
 import type { IsolatedHostApi } from './isolated-loader.ts'
-import type { SerializedWorkspaceFolder } from './protocol.ts'
+import type { SerializedSaveEvent, SerializedWorkspaceFolder } from './protocol.ts'
+
+/**
+ * 每个插件最多保留多少个文档句柄。
+ *
+ * 为什么要有上限：每保存一次就存一份 `TextDocument` 引用，
+ * 长会话会把整篇文档一直钉在内存里。超过上限就淘汰最旧的，
+ * 之后用旧句柄读正文会得到一条**明确的**"句柄已过期"，而不是空串。
+ */
+const MAX_DOCUMENT_HANDLES = 64
 
 /**
  * `IsolatedHostApi` 的 VSCode 实现：隔离子进程唯一能触达的真实能力。
@@ -34,6 +43,10 @@ export class VscodeHostApi implements IsolatedHostApi {
   readonly #outputs = new Map<number, vscode.OutputChannel>()
   readonly #statusBarItems = new Map<number, { item: vscode.StatusBarItem; pluginId: string }>()
   readonly #commands = new Map<string, string>()
+  /** 文档句柄 → 真实文档 + 归属插件。句柄有生命周期，见 #rememberDocument。 */
+  readonly #documentHandles = new Map<number, { pluginId: string; document: vscode.TextDocument }>()
+  readonly #documentHandleOrder: number[] = []
+  #documentHandleSeq = 1
   #nextHandle = 1
 
   constructor(options: VscodeHostApiOptions) {
@@ -203,6 +216,46 @@ export class VscodeHostApi implements IsolatedHostApi {
     if (entry === undefined) return
     this.#statusBarItems.delete(handle)
     entry.item.dispose()
+  }
+
+  subscribeSaveEvents(pluginId: string, forward: (payload: SerializedSaveEvent) => void): Disposable {
+    return vscode.workspace.onDidSaveTextDocument((document) => {
+      forward({
+        uri: document.uri.toString(),
+        fsPath: document.uri.fsPath,
+        languageId: document.languageId,
+        lineCount: document.lineCount,
+        version: document.version,
+        documentHandle: this.#rememberDocument(pluginId, document),
+      })
+    })
+  }
+
+  async readDocumentText(pluginId: string, handle: number): Promise<string> {
+    const entry = this.#documentHandles.get(handle)
+    if (entry === undefined) {
+      throw new Error(
+        `文档句柄 ${handle} 已过期：保存事件的正文需要**及时**读取。` +
+          `宿主只为每个插件保留最近 ${MAX_DOCUMENT_HANDLES} 个句柄 ` +
+          '（否则长会话会把整篇文档一直钉在内存里）。',
+      )
+    }
+    // 归属校验：与输出通道、状态栏项一致 —— 猜一个数字不能读别人的文档。
+    if (entry.pluginId !== pluginId) {
+      throw new Error(`文档句柄 ${handle} 不属于插件 ${pluginId}，拒绝跨插件读取`)
+    }
+    return entry.document.getText()
+  }
+
+  #rememberDocument(pluginId: string, document: vscode.TextDocument): number {
+    const handle = this.#documentHandleSeq++
+    this.#documentHandles.set(handle, { pluginId, document })
+    this.#documentHandleOrder.push(handle)
+    while (this.#documentHandleOrder.length > MAX_DOCUMENT_HANDLES) {
+      const oldest = this.#documentHandleOrder.shift()
+      if (oldest !== undefined) this.#documentHandles.delete(oldest)
+    }
+    return handle
   }
 
   workspaceFolders(): readonly SerializedWorkspaceFolder[] {

@@ -71,3 +71,22 @@ pnpm run verify        # 会构建出 packages/host/dist/isolated-worker.cjs
 想验证"未支持的属性会响亮失败"，可以把 `plugins/isolated-hello/src/index.ts` 里加一行
 `status.backgroundColor = 'red'`：热重载后插件会进入 `failed`，
 错误信息会列出**真正支持的属性集合** —— 而不是静默无效。
+
+---
+
+## M4c 追加验收：`ctx.async` 事件订阅
+
+`plugins/isolated-hello` 已经用上了（它每次收到保存事件都会往 `Isolated Hello` 输出通道写一行）。
+
+| # | 操作 | 期望观察 |
+| --- | --- | --- |
+| 1 | 确认 `isolated-hello` 是 `active` | 状态面板里应有它 |
+| 2 | 随便改一个文件并**保存**（Ctrl+S） | `Isolated Hello` 输出通道里出现 `保存：<路径>（N 行，M 字符）` |
+| 3 | 在一个大文件里保存 | **通道里只有一条摘要，没有整篇正文** —— 正文是插件按需用句柄取的，不随事件传输 |
+| 4 | 连续保存 70+ 次，然后让插件读第 1 次的正文 | 会得到明确的"**句柄已过期**"错误（宿主只为每个插件保留最近 64 个句柄，避免把文档一直钉在内存里） |
+| 5 | `VSCordis: 卸载插件…` → `isolated-hello`，然后再保存文件 | 输出通道**不再**出现新的保存行 —— 说明宿主侧订阅随卸载被释放了 |
+
+想确认"同步入口确实不可用"，可以在插件的 `activate` 里加一行
+`ctx.vscode.workspace.onDidSaveTextDocument(() => {})`：插件会进入 `failed`，
+而错误信息会**直接告诉你改用 `ctx.async.onDidSaveTextDocument`**。这是刻意的：
+只告诉用户"不行"而不告诉"那该怎么办"是半个答案。

@@ -67,6 +67,41 @@ export interface DependencyGraphSnapshot {
   readonly services: readonly ServiceView[]
 }
 
+/**
+ * 异步面上的文本文档：**纯数据快照** + 显式异步的正文读取器。
+ *
+ * 为什么不是 `TextDocument`：它的 `getText()` 是同步返回的，
+ * 而隔离模式下正文只能跨进程按需取。给一个"类型上同步、实际上跨进程"的接口
+ * 会让插件在运行时才发现语义不同 —— 所以这里**在类型上就是异步的**。
+ */
+export interface AsyncTextDocument {
+  readonly uri: string
+  readonly fsPath: string
+  readonly languageId: string
+  readonly lineCount: number
+  readonly version: number
+  /** 显式异步。同进程模式下它就是一个已 resolve 的 Promise 包装。 */
+  getText(): Promise<string>
+}
+
+/**
+ * **显式异步面**：两种执行模式都提供，签名完全一致。
+ *
+ * 这是 ADR-0016 里那个矛盾的解法：与其给隔离模式伪造一套"看起来同步"的 API，
+ * 不如把跨进程无法同步的能力单独放在一个**类型上就写着异步**的面上，
+ * 并让同进程模式也实现同一份签名 —— 于是插件代码不需要按模式分支，
+ * 也不会在运行时撞上语义差异。
+ */
+export interface AsyncApi {
+  /**
+   * 订阅文档保存事件。
+   *
+   * 返回 `Promise<Disposable>` 而不是 `Disposable`：隔离模式下订阅要跨进程建立。
+   * 同进程模式下它立刻 resolve，但**签名保持一致**。
+   */
+  onDidSaveTextDocument(listener: (document: AsyncTextDocument) => void): Promise<Disposable>
+}
+
 export interface PluginContext {
   readonly id: PluginId
   readonly manifest: PluginManifest
@@ -75,6 +110,8 @@ export interface PluginContext {
   readonly log: Logger
   readonly permissions: ReadonlySet<Permission>
   readonly vscode: PluginVscodeApi
+  /** 显式异步面，见 `AsyncApi`。两种模式都有，签名一致。 */
+  readonly async: AsyncApi
 
   // —— 时间可组合性 ——
   effect<T>(register: () => T, dispose: (resource: T) => void | Promise<void>, label?: string): T
