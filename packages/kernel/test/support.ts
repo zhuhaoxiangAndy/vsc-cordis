@@ -133,6 +133,7 @@ export function makeManifest(id: PluginId, overrides: Partial<NormalizedManifest
     main: 'dist/index.cjs',
     description: undefined,
     dependencies: {},
+    provides: [],
     permissions: [],
     trust: 'trusted',
     ...overrides,

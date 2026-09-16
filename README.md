@@ -9,7 +9,11 @@
 - **不修改 VSCode 源码，不使用非公开 API。** 宿主本身是一个普通 VSCode 扩展。
 
 ```
-进度：M1（PoC）✅   M2（依赖协调）✅   M3（热重载）✅   M4a（完整性/签名）✅   M4b（子进程隔离）✅   M5（CLI）⏳
+进度：M1（PoC）✅   M2（依赖协调）✅   M3（热重载）✅   M4a（完整性/签名）✅   M4b（子进程隔离）✅   M5（CLI）✅
+
+全部五个里程碑已交付。**但 M1–M4b 的真实验收仍需你在真 VSCode 里按 F5 走一遍**
+（三份步骤表见 `docs/acceptance-*.md`）—— 自动化测试覆盖了 kernel、加载器、watcher、完整性与隔离，
+唯独桥接层与真实 Electron 行为只能手动确认。
 ```
 
 ## 目录
@@ -19,6 +23,7 @@
 | `packages/sdk` | `@vscordis/sdk` | **契约层**：`PluginContext` / `CordisPlugin` / `plugin.json` / 权限 / 受控 API 类型。零运行时依赖。 |
 | `packages/kernel` | `@vscordis/kernel` | **实现层**：`EffectStack` / `ServiceRegistry` / `PluginHost` / 状态机。零 `vscode`、零 Node 依赖。 |
 | `packages/host` | `vscordis` | **唯一发布单元**：VSCode 扩展。把真实 API 桥接成受控面，负责加载/卸载/依赖协调/热重载。 |
+| `packages/cli` | `@vscordis/cli` | **开发工具**：`create` / `list` / `tree`（依赖图 + Mermaid）/ `sign` / `dev`。 |
 | `plugins/*` | — | 示例插件（esbuild 打成单文件 CJS）。 |
 | `docs/adr` | — | 架构决策记录，每条含权衡与否决方案。 |
 | `docs/acceptance-*.md` | — | 手动验收步骤、时延预算与未覆盖范围。 |
@@ -27,7 +32,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 93 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 119 项测试 + 构建 + 产物冒烟
 ```
 
 开发时开两个进程：
@@ -70,6 +75,34 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 刻意收窄的边界（抛错并说明原因，不给假接口）：隔离插件**不能**用服务（`ctx.use`/`provide`）、
 **不能**用 `createStatusBarItem` / `getConfiguration` / `onDidSaveTextDocument` —— 这些留到 M4c。
 `net` 权限是**约定**而非强制（Node 没有网络开关）。详见 `docs/adr/0013-isolation-backend.md`。
+
+## CLI（M5）
+
+```bash
+pnpm run tree                      # 服务依赖图（本仓库真实输出见下）
+pnpm run cli -- tree --mermaid     # Mermaid flowchart，可直接贴进 Markdown
+pnpm run cli -- create my-plugin --trust untrusted
+pnpm run cli -- list               # 退出码 1 = 发现问题，可直接进 CI
+```
+
+```
+vscordis 依赖图：4 个插件，1 个服务
+
+加载顺序：hello → isolated-hello → provider-clock → consumer-greeting
+
+服务
+  clock
+    ├─ 提供者：provider-clock
+    └─ 消费者：consumer-greeting
+```
+
+`tree` 能画出图的前提是 `plugin.json` 的 **`provides` 声明**：
+服务是运行期 `ctx.provide()` 注册的，清单里没有这个概念。
+`provides` **只服务工具**——它不参与任何加载决策，声明与实际不符也不会加载失败，
+但宿主会在激活后比对二者并**告警**（避免重演 `CordisPlugin.inject` 那种"声明了却不生效"的坑）。
+
+静态图的**硬边界**（CLI 会把它打在输出里）：服务的**版本**由运行期 `ctx.provide(name, value, {version})`
+决定，清单里没有，所以图只能校验"有没有提供者"；隔离插件不参与服务依赖。详见 `docs/adr/0014-cli-and-provides.md`。
 
 ## 能力矩阵（诚实版）
 

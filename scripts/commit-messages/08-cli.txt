@@ -1,0 +1,41 @@
+feat(cli): M5 CLI（create/list/tree/sign/dev）与 provides 声明
+
+新增
+- packages/cli：@vscordis/cli，五个命令。
+  - create：生成插件骨架（目标目录存在则**拒绝覆盖**；--trust untrusted 会附隔离限制说明）
+  - list：列出插件并做依赖图检查（坏清单只影响它自己）
+  - tree [--mermaid]：服务依赖图，文本视图 + Mermaid flowchart
+  - sign <目录> [--verify]：复用 M4a 的实现（脚本与校验器共用一份代码）
+  - dev：esbuild watch 增量重建（与 scripts/watch.mjs 同策略：编译归开发期）
+- packages/cli/src/graph.ts：**纯函数**依赖图核心（无 IO），检测缺提供者 / 多提供者 /
+  依赖环 / 隔离插件声明服务 / 版本提示，并给出拓扑加载顺序。
+- plugin.json 新增 `provides` 声明；内核校验；宿主激活后比对声明与实际并**告警**。
+
+为什么需要 provides
+服务是运行期 ctx.provide() 注册的，清单里原本只有 dependencies（我需要什么），
+没有"我会提供什么" —— 静态依赖图根本画不出来。
+
+关键决策（ADR-0014）
+- `provides` **只服务工具**：不参与任何加载决策；声明与实际不符**不会**导致加载失败，
+  但宿主会告警。取这个中间态的理由：不检查会重演 CordisPlugin.inject 那个坑
+  （声明了却不生效且无反馈），而阻断会把纯工具字段变成加载门槛。
+- 静态图的硬边界写进 CLI 输出本身：服务**版本**由运行期 ctx.provide({version}) 决定，
+  清单里没有这个概念，所以图只能校验"有没有提供者"；隔离插件不参与服务依赖。
+- CLI **复用**而非复制：discovery 与 integrity 都从 host 包相对导入，保证只有一份实现。
+  代价写清：CLI 无法脱离本 monorepo 单独发布（它是 private 的内部工具）。
+- 退出码 0/1/2，于是 `vscordis list` 可以直接进 CI。
+
+真跑一遍（本仓库真实插件）
+    vscordis 依赖图：4 个插件，1 个服务
+    加载顺序：hello → isolated-hello → provider-clock → consumer-greeting
+    clock  ├─ 提供者：provider-clock  └─ 消费者：consumer-greeting
+    发现的问题（0）
+
+验证
+- typecheck 0 错误；119 项测试全绿（新增 26 项 CLI：12 项依赖图纯函数 + 14 项命令级）。
+- 命令级测试真的跑字节（读 stdout/stderr、看生成的文件），而不是调用内部函数。
+
+未覆盖（写入 ADR-0014）
+- dev 是长驻进程，没有端到端测试（已测其前置检查）。
+- Mermaid 只断言语法结构，未在真实渲染器里看过。
+- create 生成的骨架没有"生成后立即构建并加载"的端到端测试。

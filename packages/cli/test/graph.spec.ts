@@ -1,0 +1,128 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { buildGraph, renderMermaid, renderText, type GraphPlugin } from '../src/graph.ts'
+
+function plugin(id: string, overrides: Partial<GraphPlugin> = {}): GraphPlugin {
+  return {
+    id,
+    dir: `/plugins/${id}`,
+    version: '1.0.0',
+    trust: 'trusted',
+    provides: [],
+    dependencies: {},
+    ...overrides,
+  }
+}
+
+test('健康的一对：无 findings，且提供者排在消费者之前', () => {
+  const graph = buildGraph([
+    plugin('consumer', { dependencies: { clock: '^1.0.0' } }),
+    plugin('provider', { provides: ['clock'] }),
+  ])
+
+  assert.deepEqual(graph.findings, [])
+  assert.deepEqual(graph.loadOrder, ['provider', 'consumer'])
+  assert.deepEqual(graph.services, [{ name: 'clock', providers: ['provider'] }])
+  assert.deepEqual(graph.consumers.clock, ['consumer'])
+})
+
+test('依赖一个没人提供的服务 → error（该插件会在运行期被 parked）', () => {
+  const graph = buildGraph([plugin('lonely', { dependencies: { clock: '^1.0.0' } })])
+  assert.equal(graph.findings.length, 1)
+  assert.equal(graph.findings[0]?.level, 'error')
+  assert.match(graph.findings[0]?.message ?? '', /没有任何插件声明提供它/)
+  assert.match(graph.findings[0]?.message ?? '', /paused/)
+})
+
+test('同一服务多个提供者 → error（运行期 exclusive 策略会抛 ServiceConflictError）', () => {
+  const graph = buildGraph([plugin('a', { provides: ['clock'] }), plugin('b', { provides: ['clock'] })])
+  const finding = graph.findings.find((candidate) => candidate.message.includes('个提供者'))
+  assert.ok(finding !== undefined)
+  assert.equal(finding.level, 'error')
+  assert.match(finding.message, /ServiceConflictError/)
+})
+
+test('服务依赖环 → error，并打印环路', () => {
+  const graph = buildGraph([
+    plugin('a', { provides: ['sa'], dependencies: { sb: '*' } }),
+    plugin('b', { provides: ['sb'], dependencies: { sa: '*' } }),
+  ])
+  const cycle = graph.findings.find((candidate) => candidate.message.includes('依赖环'))
+  assert.ok(cycle !== undefined)
+  assert.equal(cycle.level, 'error')
+  assert.match(cycle.message, /a → b → a|b → a → b/)
+})
+
+test('自依赖不算环', () => {
+  const graph = buildGraph([plugin('selfish', { provides: ['s'], dependencies: { s: '*' } })])
+  assert.deepEqual(graph.findings, [])
+})
+
+test('隔离插件声明服务 → warning（隔离模式下 provide/use 会抛错）', () => {
+  const graph = buildGraph([plugin('iso', { trust: 'untrusted', provides: ['clock'] })])
+  assert.equal(graph.findings.length, 1)
+  assert.equal(graph.findings[0]?.level, 'warning')
+  assert.match(graph.findings[0]?.message ?? '', /隔离模式下 ctx\.provide\/ctx\.use 会抛错/)
+})
+
+test('版本提示：提供者插件版本明显不满足范围 → warning，并说明服务版本是运行期决定的', () => {
+  const graph = buildGraph([
+    plugin('provider', { version: '1.0.0', provides: ['clock'] }),
+    plugin('consumer', { dependencies: { clock: '^2.0.0' } }),
+  ])
+  const warning = graph.findings.find((candidate) => candidate.level === 'warning')
+  assert.ok(warning !== undefined)
+  assert.match(warning.message, /运行期 ctx\.provide/)
+})
+
+test('版本满足时不产生提示', () => {
+  const graph = buildGraph([
+    plugin('provider', { version: '1.2.0', provides: ['clock'] }),
+    plugin('consumer', { dependencies: { clock: '^1.0.0' } }),
+  ])
+  assert.deepEqual(graph.findings, [])
+})
+
+test('findings 排序：error 在前', () => {
+  const graph = buildGraph([
+    plugin('iso', { trust: 'untrusted', provides: ['clock'] }),
+    plugin('lonely', { dependencies: { nothing: '*' } }),
+  ])
+  assert.equal(graph.findings[0]?.level, 'error')
+  assert.equal(graph.findings.at(-1)?.level, 'warning')
+})
+
+test('renderText：包含加载顺序、服务、插件与版本免责说明', () => {
+  const text = renderText(
+    buildGraph([plugin('provider', { provides: ['clock'] }), plugin('consumer', { dependencies: { clock: '^1.0.0' } })]),
+  )
+  assert.match(text, /加载顺序：provider → consumer/)
+  assert.match(text, /├─ 提供者：provider/)
+  assert.match(text, /└─ 消费者：consumer/)
+  assert.match(text, /静态图只能校验"有没有提供者"/)
+})
+
+test('renderMermaid：provides 与依赖边都在，隔离插件带虚线 class', () => {
+  const mermaid = renderMermaid(
+    buildGraph([
+      plugin('provider', { provides: ['clock'] }),
+      plugin('iso', { trust: 'untrusted', dependencies: { clock: '^1.0.0' } }),
+    ]),
+  )
+  assert.match(mermaid, /^flowchart LR/m)
+  assert.match(mermaid, /p_provider -->\|provides\| s_clock/)
+  assert.match(mermaid, /s_clock -->\|"\^1\.0\.0"\| p_iso/)
+  assert.match(mermaid, /class p_iso isolated/)
+})
+
+test('没有插件时不崩', () => {
+  const graph = buildGraph([])
+  assert.deepEqual(graph.findings, [])
+  assert.deepEqual(graph.loadOrder, [])
+  assert.match(renderText(graph), /<无>/)
+})
+
+test('服务名里的特殊字符会被 Mermaid 标识符转义', () => {
+  const mermaid = renderMermaid(buildGraph([plugin('p', { provides: ['weird.name'] })]))
+  assert.match(mermaid, /s_weird_name\(\("weird\.name"\)\)/)
+})

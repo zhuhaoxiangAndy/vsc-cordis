@@ -33,6 +33,7 @@ const builtins: readonly BuiltinPlugin[] = [
         main: 'index.js',
         description: 'Web 端内置的 M1 PoC 插件',
         dependencies: {},
+        provides: [],
         permissions: ['vscode:commands.register', 'vscode:window.messages'],
         trust: 'trusted',
       },

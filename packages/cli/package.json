@@ -1,0 +1,21 @@
+{
+  "name": "@vscordis/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "vscordis CLI: create / list / tree / sign / dev",
+  "bin": {
+    "vscordis": "./dist/cli.cjs"
+  },
+  "main": "./src/bin.ts",
+  "scripts": {
+    "build": "node ../../scripts/build.mjs"
+  },
+  "dependencies": {
+    "@vscordis/kernel": "workspace:*",
+    "@vscordis/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

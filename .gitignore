@@ -9,6 +9,9 @@ coverage/
 Thumbs.db
 # 热重载集成测试的临时工作区（测试运行时生成，不入库）
 packages/host/test/scratch/
+# CLI 测试的临时工作区（同上）
+packages/cli/test/scratch/
+packages/cli/test/scratch-out.txt
 # 私钥绝不入库（见 docs/adr/0008-secret-management.md）
 *.key
 *.pem
