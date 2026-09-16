@@ -248,3 +248,69 @@ test('runtime：同进程 ctx.async 事件全链路（bridge 订阅 → stub 发
     await runtime.dispose()
   }
 })
+
+test('runtime：热重载改 plugin.json#id 后旧 incarnation 与旧命令必须消失', async () => {
+  const root = path.join(scratch, `runtime-idchange-${runId}`)
+  const pluginRoot = path.join(root, 'plugins')
+  const pluginDir = path.join(pluginRoot, 'plug')
+
+  const writePluginWithId = async (id: string, command: string): Promise<void> => {
+    await mkdir(path.join(pluginDir, 'dist'), { recursive: true })
+    await writeFile(
+      path.join(pluginDir, 'dist', 'index.cjs'),
+      `module.exports = {
+         activate(ctx) {
+           ctx.effect(
+             () => ctx.vscode.commands.registerCommand('${command}', () => '${command}'),
+             (d) => d.dispose(),
+             'cmd:${command}',
+           )
+         },
+       }\n`,
+      'utf8',
+    )
+    await writeFile(
+      path.join(pluginDir, 'plugin.json'),
+      `${JSON.stringify(
+        {
+          id,
+          name: id,
+          version: '1.0.0',
+          main: 'dist/index.cjs',
+          trust: 'trusted',
+          permissions: ['vscode:commands.register'],
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    )
+  }
+
+  await writePluginWithId('old-id', 'old.cmd')
+  stub.setConfig('vscordis', 'pluginRoots', [pluginRoot])
+  stub.setConfig('vscordis', 'autoLoad', true)
+  stub.setConfig('vscordis', 'hotReload', true)
+  stub.setConfig('vscordis', 'hotReloadDebounceMs', 10)
+
+  const runtime = makeRuntime(path.join(scratch, `runtime-idchange-store-${runId}`))
+  try {
+    await runtime.initialize()
+    assert.equal(runtime.host.view('old-id')?.state, 'active', '哨兵：旧 id 一开始确实 active')
+    assert.equal(stub.state.commands.has('old.cmd'), true, '哨兵：旧命令确实已注册')
+
+    // 同一个目录改 id：热重载必须先卸旧 incarnation，再按新 id 加载
+    await writePluginWithId('new-id', 'new.cmd')
+    const deadline = Date.now() + 8_000
+    while (Date.now() < deadline && runtime.host.view('new-id')?.state !== 'active') {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+
+    assert.equal(runtime.host.view('new-id')?.state, 'active', '新 id 必须被加载')
+    assert.equal(runtime.host.view('old-id'), undefined, '改 id 后旧 incarnation 必须被卸载')
+    assert.equal(stub.state.commands.has('old.cmd'), false, '旧命令必须从注册表消失（无幽灵命令）')
+    assert.equal(stub.state.commands.has('new.cmd'), true, '新命令应当已注册')
+  } finally {
+    await runtime.dispose()
+  }
+})

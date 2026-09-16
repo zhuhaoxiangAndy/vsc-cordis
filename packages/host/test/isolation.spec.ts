@@ -667,6 +667,70 @@ test('环境变量：实际 fork 默认不继承宿主敏感变量，inheritEnv=
   }
 })
 
+test('隔离边界：畸形 IPC 消息只失败该会话，不能让宿主进程崩溃', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'bad-ipc',
+    `module.exports = {
+       activate() {
+         process.send(null)
+       },
+     }\n`,
+  )
+  const { host, loader } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), (error: unknown) => {
+    assert.match(String(error), /违反隔离 IPC 协议|非法/)
+    return true
+  })
+  assert.equal(loader.sessionsStarted, 1, '会话确实启动过（避免"从未启动"假绿）')
+  await sleep(100)
+  assert.equal(loader.activeSessions, 0, '畸形消息后子进程必须被终止')
+})
+
+test('隔离边界：workspaceFolders 需要 vscode:workspace.read（隔离路径也要生效）', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'workspace-read-gate',
+    `module.exports = {
+       activate(ctx) {
+         const folders = ctx.vscode.workspace.workspaceFolders
+         ctx.log.info('folders:' + JSON.stringify(folders))
+       },
+     }\n`,
+  )
+  const { host } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), (error: unknown) => {
+    assert.match(String(error), /vscode:workspace\.read/)
+    return true
+  })
+  assert.equal(host.view('workspace-read-gate')?.state, 'failed')
+})
+
+test('隔离边界：有 workspace.read 时 workspaceFolders 正常同步返回', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'workspace-read-ok',
+    `module.exports = {
+       activate(ctx) {
+         const names = (ctx.vscode.workspace.workspaceFolders ?? []).map((folder) => folder.name)
+         ctx.log.info('workspace-names:' + names.join(','))
+       },
+     }\n`,
+    { permissions: ['vscode:workspace.read'] },
+  )
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    await sleep(100)
+    assert.equal(host.view('workspace-read-ok')?.state, 'active')
+    assert.ok(hostApi.logs.some((log) => log.message.includes('workspace-names:fake')))
+  } finally {
+    await host.unload('workspace-read-ok')
+    await host.settle()
+  }
+})
+
 test('隔离边界：未授权能力在宿主侧被拒绝（宿主的判定是权威的）', async () => {
   const hostApi = new FakeHostApi()
   const entry = await makeFixture(
@@ -1256,6 +1320,53 @@ test('ADR-0019：隔离提供者之间显式 last-wins 生效（冲突策略必�
     await host.settle()
     assert.equal(host.view('svc-lw-c')?.state, 'failed')
     assert.equal(host.registry.snapshot().services.find((item) => item.name === 'greeting')?.provider?.owner, 'svc-lw-b')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：被 last-wins 替换者卸载，不能删掉接管者的远程路由', async () => {
+  const hostApi = new FakeHostApi()
+  const providerSource = (value: string, conflict?: boolean): string =>
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('greeting', { hello: () => '${value}' }, { version: '1.0.0'${
+           conflict === true ? ", conflict: 'last-wins'" : ''
+         } })
+       },
+     }\n`
+  const replaced = await makeFixture('svc-lw-keep-a', providerSource('from-a'))
+  const taker = await makeFixture('svc-lw-keep-b', providerSource('from-b', true))
+  const consumer = await makeFixture(
+    'svc-lw-keep-consumer',
+    `module.exports = {
+       activate: async (ctx) => {
+         const greeting = await ctx.async.useService('greeting')
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('greet.keep', async () => await greeting.hello()),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(replaced)
+    await host.load(taker)
+    await host.load(consumer)
+    await host.settle()
+    assert.equal(await hostApi.executeCommand('svc-lw-keep-consumer', 'greet.keep', []), 'from-b')
+
+    // 卸载被替换者 A：注册表与路由器都必须仍然指向接管者 B
+    await host.unload('svc-lw-keep-a')
+    await host.settle()
+    const service = host.registry.snapshot().services.find((item) => item.name === 'greeting')
+    assert.equal(service?.provider?.owner, 'svc-lw-keep-b')
+    assert.equal(await hostApi.executeCommand('svc-lw-keep-consumer', 'greet.keep', []), 'from-b')
   } finally {
     await host.unloadAll().catch(() => undefined)
     await host.settle()

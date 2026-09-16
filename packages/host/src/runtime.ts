@@ -178,6 +178,9 @@ export class Runtime {
     const result = await discoverPlugins(this.#pluginRoots())
     this.#entries = sortByDependencies(result.entries)
     this.#problems = result.problems
+    // 重建而不是只 set：目录改名/插件换 id 后，旧映射必须消失，
+    // 否则"删除旧目录"会把新目录里活着的同 id 插件误卸载（审计复现）。
+    this.#dirToId.clear()
     for (const entry of this.#entries) this.#dirToId.set(normalizeDir(entry.root), entry.manifest.id)
     for (const problem of result.problems) this.bridge.log('warn', `[发现] ${problem}`)
   }
@@ -190,28 +193,48 @@ export class Runtime {
    */
   async #handleReloadPlan(plan: ReloadPlan): Promise<void> {
     const started = Date.now()
+    // 先留存旧映射：refresh 会重建 #dirToId，之后就无法知道某个目录以前是哪个 id。
+    const previousDirToId = new Map(this.#dirToId)
 
     if (plan.rediscover) await this.#refreshEntries()
 
     const byDir = new Map(this.#entries.map((entry) => [normalizeDir(entry.root), entry]))
     const targets: PluginEntry[] = []
     const removed: string[] = []
+    const idChanges: { readonly oldId: string; readonly entry: PluginEntry }[] = []
 
     for (const dir of plan.changedDirs) {
-      const entry = byDir.get(normalizeDir(dir))
+      const key = normalizeDir(dir)
+      const entry = byDir.get(key)
+      const previousId = previousDirToId.get(key)
       if (entry !== undefined) {
-        targets.push(entry)
+        if (previousId !== undefined && previousId !== entry.manifest.id) {
+          // plugin.json#id 变了：同一个目录必须先卸掉旧 id，再按新 id 加载，
+          // 否则旧 incarnation 与旧命令会永远活着（违反 ADR-0015 无残留）。
+          idChanges.push({ oldId: previousId, entry })
+        } else {
+          targets.push(entry)
+        }
         continue
       }
       // 目录已消失 → 卸载它此前对应的插件。保守起见只在"目录确实不存在"时才这么做，
       // 避免一次瞬时 IO 失败把全部插件卸掉。
-      const id = this.#dirToId.get(normalizeDir(dir))
-      if (id !== undefined && !existsSync(dir)) removed.push(id)
+      if (previousId !== undefined && !existsSync(dir)) removed.push(previousId)
     }
 
     for (const id of removed) {
       await this.host.unload(id)
       this.bridge.log('info', `[热重载] 插件目录已删除，已卸载 ${id}`)
+    }
+
+    for (const change of idChanges) {
+      await this.host.unload(change.oldId)
+      this.bridge.log(
+        'info',
+        `[热重载] 插件 id 变化：${change.oldId} → ${change.entry.manifest.id}，旧 incarnation 已卸载`,
+      )
+      // 旧 id 卸干净后再走统一加载路径；漏掉这一步会变成"只删不建"。
+      targets.push(change.entry)
     }
 
     for (const entry of targets) {

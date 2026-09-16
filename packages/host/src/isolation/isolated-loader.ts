@@ -210,6 +210,30 @@ export class PluginIntegrityCheckError extends Error {
   }
 }
 
+/**
+ * 子进程消息的第一道门：只接受“非 null 对象 + 已知 kind”。
+ *
+ * 子进程由第三方插件代码控制，`process.send(null)` 或任意对象都会到达宿主的 message
+ * 事件；直接读 `message.kind` 会把 TypeError 抛进宿主事件循环，等于给 untrusted 插件
+ * 一个 DoS。这里做结构校验，`#handle` 外层再包 try/catch，畸形消息只失败该会话。
+ */
+const CHILD_MESSAGE_KINDS = new Set<string>([
+  'ready',
+  'activated',
+  'deactivated',
+  'failed',
+  'log',
+  'call',
+  'result',
+  'serviceResult',
+])
+
+function isChildToHost(message: unknown): message is ChildToHost {
+  if (message === null || typeof message !== 'object') return false
+  const kind = (message as { kind?: unknown }).kind
+  return typeof kind === 'string' && CHILD_MESSAGE_KINDS.has(kind)
+}
+
 export class IsolatedPluginLoader {
   readonly #options: IsolatedLoaderOptions
   /**
@@ -282,7 +306,11 @@ export class IsolatedPluginLoader {
       dispose: (): void => {
         if (disposed) return
         disposed = true
-        this.#remoteServices.delete(name)
+        // 只有路由表仍指向本次 provide 才删除：last-wins 接管后，被替换者的清理
+        // 不能把**当前接管者**的路由删掉（ADR-0019 决策 8 的边界不含这条）。
+        if (this.#remoteServices.get(name)?.token === token) {
+          this.#remoteServices.delete(name)
+        }
         handle.dispose()
       },
     }
@@ -604,7 +632,15 @@ class IsolatedSession {
       this.#options.log(`[${this.#pluginId}] [stderr] ${chunk.toString().trimEnd()}`),
     )
     child.on('message', (message: unknown) => {
-      this.#handle(message as ChildToHost)
+      if (!isChildToHost(message)) {
+        this.#protocolViolation(`收到非法的隔离 IPC 消息：${describe(message)}`)
+        return
+      }
+      try {
+        this.#handle(message)
+      } catch (error) {
+        this.#protocolViolation(`处理 ${message.kind} 消息时抛错：${errorToWire(error)}`)
+      }
     })
     child.on('error', (error: Error) => {
       this.#failAll(`子进程错误：${errorToWire(error)}`)
@@ -637,13 +673,19 @@ class IsolatedSession {
         ? {}
         : await this.#options.hostApi.readConfiguration(this.#pluginId, configuration.section, configuration.keys)
 
+    const permissions = toIsolatedPermissions(
+      new Set(this.#options.entry.manifest.permissions as readonly Permission[]),
+    )
+
     this.#send({
       kind: 'activate',
       protocolVersion: PROTOCOL_VERSION,
       pluginId: this.#pluginId,
       pluginEntry: this.#options.entry.mainPath,
-      permissions: toIsolatedPermissions(new Set(this.#options.entry.manifest.permissions as readonly Permission[])),
-      workspaceFolders: this.#options.hostApi.workspaceFolders(),
+      permissions,
+      // 工作区路径也是数据：没有 workspace.read 时不预取、不发送（ADR-0005 权限表）。
+      // 子进程侧还有一道本地同步门；这里少发一份是不让宿主数据先进入不可信进程。
+      workspaceFolders: permissions.workspace.read ? this.#options.hostApi.workspaceFolders() : [],
       configSnapshot,
       disposeTimeoutMs: this.#options.disposeTimeoutMs,
       disposeBudgetMs: this.#options.disposeBudgetMs,
@@ -1055,6 +1097,20 @@ class IsolatedSession {
       // 同上
     }
     this.#configSubscription = undefined
+  }
+
+  /**
+   * 协议违规（畸形消息/处理时抛错）只失败本会话：
+   * reject 启动阶段的两个 deferred 让 `load()` 快速失败，而不是干等 readyTimeout；
+   * 再 kill 子进程，避免后续任意消息继续冲击宿主事件循环。
+   */
+  #protocolViolation(reason: string): void {
+    const error = new Error(`插件 ${this.#pluginId} 违反隔离 IPC 协议：${reason}`)
+    this.#options.log(`[${this.#pluginId}] ${error.message}`)
+    this.#ready.reject(error)
+    this.#activated.reject(error)
+    this.#failAll(error.message)
+    this.kill()
   }
 
   #failAll(reason: string): void {

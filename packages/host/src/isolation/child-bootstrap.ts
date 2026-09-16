@@ -542,6 +542,7 @@ function buildVscodeProxy(permissions: IsolatedPermissions): PluginVscodeApi {
     },
     workspace: {
       get workspaceFolders(): readonly never[] | undefined {
+        requireLocally(permissions.workspace.read, 'vscode:workspace.read')
         return workspaceFolders as never[]
       },
       getConfiguration: ((section?: string) =>
