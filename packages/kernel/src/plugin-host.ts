@@ -74,6 +74,15 @@ export interface PluginHostOptions {
   /** in-flight 调用的强制回收上限；默认 2000ms（ADR-0007 决策 6）。 */
   readonly disposeTimeoutMs?: number
   /**
+   * 单个插件整栈回收的**总时长预算**；`0`/缺省 = 不设预算（ADR-0015 已知缺口 1）。
+   *
+   * 每项 teardown 各自有界还不够：N 项都挂死就是 N × `disposeTimeoutMs`，
+   * 而所有生命周期操作共用一条串行队列 —— 期间宿主整体失去响应。
+   * 预算在"项与项之间"检查，超出后剩余项**不再执行**并逐项上报（这是刻意的取舍：
+   * 宁可少回收几项并留下可检索的记录，也不让宿主长时间回不来）。
+   */
+  readonly disposeBudgetMs?: number
+  /**
    * 单个插件 `activate()` 的时限；默认 15000ms。
    *
    * 为什么必须有：所有生命周期操作共用一条**串行队列**，一个永不 resolve 的 `activate`
@@ -96,6 +105,7 @@ export class PluginHost {
   readonly #registry: ServiceRegistry
   readonly #records = new Map<PluginId, PluginRecord>()
   readonly #disposeTimeoutMs: number
+  readonly #disposeBudgetMs: number
   readonly #activationTimeoutMs: number
   readonly #hostVersion: string | undefined
   readonly #vscodeVersion: string | undefined
@@ -107,6 +117,7 @@ export class PluginHost {
   constructor(options: PluginHostOptions) {
     this.#port = options.port
     this.#disposeTimeoutMs = options.disposeTimeoutMs ?? 2_000
+    this.#disposeBudgetMs = options.disposeBudgetMs ?? 0
     this.#activationTimeoutMs = options.activationTimeoutMs ?? 15_000
     this.#hostVersion = options.hostVersion
     this.#vscodeVersion = options.vscodeVersion
@@ -270,6 +281,7 @@ export class PluginHost {
     const effects = new EffectStack({
       label: manifest.id,
       disposeTimeoutMs: this.#disposeTimeoutMs,
+      disposeBudgetMs: this.#disposeBudgetMs,
       onError: (error, label) => {
         this.#port.log('error', `副作用回收失败：${label ?? '<未命名>'}`, {
           plugin: manifest.id,

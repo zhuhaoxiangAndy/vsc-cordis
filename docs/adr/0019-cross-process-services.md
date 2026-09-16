@@ -102,13 +102,82 @@ ADR-0018 给出了解法（`ctx.async` 显式异步面），本 ADR 把它用在
 于是 `await ctx.async.useService('clock')` 直接炸在 `get("then")` 上（"没有方法 then"）。
 三处代理（子进程侧、宿主侧、同进程的 `wrapAsyncService`）都要特判 `then` 并放行成 `undefined`。
 
+## 后续轮次补齐（把"未覆盖"变成有测试的决策）
+
+### 决策 7：版本范围在**取用点**也强制（`ServiceRegistry.assertSatisfies`）
+
+1. `tryResolve(name, range?)` 开始接受范围：**版本不符抛 `ServiceVersionMismatchError`，不是返回 undefined**，
+   `ctx.tryUse` 会把 `plugin.json#dependencies` 里的范围传下去。理由与决策 3 同源：
+   把"存在但版本不符"当成"软依赖不存在"，是比抛错更糟的静默失败。
+2. 隔离消费者的 `services.use` 在宿主侧复查范围。范围取自**宿主**持有的 `plugin.json#dependencies`
+   （子进程里的 manifest 是 stub：`version: '0.0.0'`、没有 dependencies —— 不可信也不完整），
+   并登记到依赖边上（`depend(..., range)`），于是注册表快照 / `vscordis tree` 能看到声明的范围。
+3. **诚实说明**：加载前的依赖预检（`canResolve(name, range)`）其实已经拦住了"范围不满足还去启动"
+   的常见情况（测试：声明 `^2.0.0` 的隔离消费者停在 `paused`，连子进程都不起）。
+   所以这一条的真实价值是**取用点的防御性复查 + 补齐软依赖（`tryResolve`）这条洞**，
+   而不是修一个必现 bug —— 但"能不能解析到"与"拿到手的提供者满足契约"本就该各查一次。
+4. 版本不符的错误信息给出两条出路（换提供者版本 / 放宽声明范围），由测试断言存在。
+
+### 决策 8：冲突策略必须跨进程传过去（否则 `last-wins` 被静默降级）
+
+隔离模式下 `ctx.provide(name, obj, { conflict: 'last-wins' })` 原本**丢掉了 conflict 字段** ——
+子进程只发 `[name, version, methods]`，宿主按默认 `exclusive` 注册。这正是 ADR-0017 命名的
+"声明了却不生效"。现在：
+
+- `services.provide` 带第 4 个参数（`'exclusive' | 'last-wins'`）；
+- 未知值 **fail-closed**：宿主消息处理与 `ServiceRegistry.provide` 都抛错，而不是静默当 exclusive；
+- 测试：两个隔离提供者，后者显式 last-wins 接管，消费者被级联重启后拿到新提供者；
+  第三个提供者（缺省策略）仍然响亮失败（`ServiceConflictError`）。
+- 已知语义（与同进程一致，刻意不特殊化）：**接管者卸载后服务消失，被替换者不会自动复位**。
+  自动复位需要"被替换者继续保活并有恢复顺序"，那会把 last-wins 变成难以推理的栈 —— 不做。
+
+### 决策 9：`remote` 标记不可由插件设置（同进程与隔离两处都响亮拒绝）
+
+`ProvideOptions.remote` 是**运行时标注**（隔离 loader 在宿主侧注册时写入）。
+若允许插件自设，一个同进程服务会变成"同步消费者被拒绝"的假远程服务 —— 又一个类型谎言。
+`kernel/context.ts` 与 `child-bootstrap.ts` 的 `ctx.provide` 都拒绝，并各有测试断言：
+失败后插件是 `failed`、注册表里不留服务槽位。
+
+### 决策 10：子进程**异常退出**时，在途调用必须被拒绝
+
+`#failAll` 原来只在 `kill()` 与 `'error'` 里调用。子进程被 `process.exit()` 或外部信号带走时走
+`'exit'` 处理器，不经过 `kill()` —— 于是宿主 `#serviceInvokes` 里的 deferred 永远不 settle，
+消费者会一直等一个已经死掉的进程。这是**活锁**，比报错更糟。
+
+修法：`'exit'` 处理器先 `#failAll(...)` 再 `#cleanupHostSide()`。
+回归测试刻意**绕过插件依赖边**（直接拿 `resolveForAsync` 返回的宿主侧代理再调用）：
+否则提供者退出会级联暂停消费者、由"消费者会话已终止"来 reject，用例即使漏修也会通过（假绿）。
+反向验证：临时移除这行 `#failAll`，用例以"在途调用必须被拒绝，而不是永远挂起"失败
+（用 `Promise.race` 把"挂起"变成可判定的断言，而不是让整轮测试超时）。
+
+### 决策 11：参数与返回值在**调用点**做 structured clone 前置校验
+
+IPC 用 `serialization: 'advanced'`（structured clone），所以：
+
+- 函数/`Symbol`/`Promise`/`WeakMap` 这类值会在传输层抛 `DataCloneError` —— 错误里**没有**"哪个方法、第几个参数、哪条路径"；
+- 类实例更糟：它**不报错**，但跨进程后原型与方法被静默丢掉（正是本项目拒绝的"看起来能过、实际丢东西"）。
+
+`kernel/cloneable.ts` 提供 `inspectCloneable()`（深度优先、可读路径、循环引用安全、深度上限 64、
+内建类型用品牌校验防 `Symbol.toStringTag` 伪装）与统一文案 `formatCloneProblem()`。四个调用点：
+
+1. 消费者子进程代理（`child-bootstrap.ts`）调 `assertCloneableArgs` → 参数方向；
+2. 宿主侧远程代理（`isolated-loader.ts`，同进程消费者走这条）同样前置校验；
+3. 提供者子进程在回传方法结果前校验 → 返回值方向；
+4. `callHost` / `Session.#send` 保留 try/catch 兜底（Proxy 在纯 JS 里认不出来），
+   并把"发不出去"变成一次**失败应答** —— 否则宿主 `#serviceInvokes` 会永远挂起（活锁，同决策 10）。
+
+边界（刻意保守）：装箱原始值（`new Number(7)`）被拒绝（Node 能保留、浏览器规范可能降级为原始值），
+文案引导改传原始值；symbol 键、非枚举属性、Date/RegExp/Map/Set/Error 的自定义字段属于
+"静默丢弃但不报错"，不在校验面内。命令（`invoke`）方向的参数/返回值**尚未**做同样校验（见"未覆盖"）。
+
 ## 未覆盖
 
 1. **参数与返回值必须能被 structured clone**。不可克隆的值（函数、类实例、`Symbol` 等）
    会在 IPC 层抛错，而不是在调用点给出友好提示 —— 没有做前置校验。
-2. **没有版本协商**：`services.use` 不校验消费者在清单里声明的版本范围。
-   版本检查仍停留在"宿主能不能解析到"这一层。
-3. **远程路径上的多提供者语义未验证**：`last-wins` 在隔离提供者之间是否按预期工作没有测试。
+2. ~~没有版本协商~~ → **决策 7**：`tryResolve` 与隔离取用点都强制声明的范围（并如实记录
+   加载前预检已经覆盖了常见情况）。
+3. ~~远程路径上的多提供者语义未验证~~ → **决策 8**：`conflict` 跨进程传递并测试 last-wins；
+   接管者卸载后不回退到被替换者（与同进程一致，有意为之）。
 4. **在途调用被拒绝后不自动重试**：消费者需要自己处理（这也是刻意的 ——
    静默重试会让"提供者换了人"变成难以观察的行为）。
 5. 隔离插件之间**不能互相 `ctx.use`**（只能用 `ctx.async.useService`），

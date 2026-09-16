@@ -86,6 +86,12 @@ export class ServiceRegistry {
 
   provide<T>(owner: PluginId, name: ServiceName, instance: T, options: ProvideOptions = {}): Disposable {
     const policy = options.conflict ?? 'exclusive'
+    // 未知策略 fail-closed：静默当作 exclusive 会让"声明了却不生效"的陷阱再出现一次。
+    if (policy !== 'exclusive' && policy !== 'last-wins') {
+      throw new Error(
+        `未知的服务冲突策略 "${String(policy)}"：只支持 'exclusive'（默认）与 'last-wins'（ADR-0007 决策 3）。`,
+      )
+    }
     let slot = this.#slots.get(name)
     if (slot === undefined) {
       slot = { provider: undefined, generation: 0, consumers: new Map() }
@@ -152,19 +158,36 @@ export class ServiceRegistry {
   resolve<T>(name: ServiceName, range?: string): T {
     const provider = this.#slots.get(name)?.provider
     if (provider === undefined) throw new ServiceUnavailableError(name, range)
-    if (range !== undefined && range !== '*' && !satisfies(provider.version ?? '', range)) {
-      throw new ServiceVersionMismatchError(name, range, provider.version)
-    }
+    this.#assertRangeSatisfied(name, provider, range)
     if (provider.remote) throw new RemoteServiceError(name, provider.owner)
     return provider.instance as T
   }
 
-  /** 宽松解析：缺失时返回 undefined；但**提供者在独立进程**时同样抛错（不是"缺失"）。 */
-  tryResolve<T>(name: ServiceName): T | undefined {
+  /**
+   * 宽松解析：缺失时返回 undefined；但**提供者在独立进程**时同样抛错（不是"缺失"）。
+   *
+   * `range` 与严格解析一样强制（ADR-0019）：版本不满足也**不是"缺失"**——
+   * 返回 undefined 会让插件把"存在但版本不符"静默当成"软依赖不存在"，然后走错分支。
+   */
+  tryResolve<T>(name: ServiceName, range?: string): T | undefined {
     const provider = this.#slots.get(name)?.provider
     if (provider === undefined) return undefined
+    this.#assertRangeSatisfied(name, provider, range)
     if (provider.remote) throw new RemoteServiceError(name, provider.owner)
     return provider.instance as T
+  }
+
+  /**
+   * 只做版本范围校验、不取实例的入口（供隔离消费者的取用点使用，ADR-0019）。
+   *
+   * 为什么需要它：隔离消费方的路由要强制消费者在 `plugin.json#dependencies` 里声明的范围，
+   * 但它只需要方法表，**不该**（也不需要）拿到宿主侧的异步代理实例 ——
+   * 那正是 `resolveForAsync()` 的用途，两者不能互相借用。
+   */
+  assertSatisfies(name: ServiceName, range: string | undefined): void {
+    const provider = this.#slots.get(name)?.provider
+    if (provider === undefined) throw new ServiceUnavailableError(name, range)
+    this.#assertRangeSatisfied(name, provider, range)
   }
 
   /**
@@ -177,9 +200,7 @@ export class ServiceRegistry {
   resolveForAsync<T>(name: ServiceName, range?: string): T {
     const provider = this.#slots.get(name)?.provider
     if (provider === undefined) throw new ServiceUnavailableError(name, range)
-    if (range !== undefined && range !== '*' && !satisfies(provider.version ?? '', range)) {
-      throw new ServiceVersionMismatchError(name, range, provider.version)
-    }
+    this.#assertRangeSatisfied(name, provider, range)
     return provider.instance as T
   }
 
@@ -312,6 +333,24 @@ export class ServiceRegistry {
   clear(): void {
     this.#slots.clear()
     this.#provides.clear()
+  }
+
+  /**
+   * 版本范围的唯一强制点：`resolve` / `tryResolve` / `resolveForAsync` / `assertSatisfies`
+   * 共用它，避免四条入口各写一遍 `satisfies()` 而漂移。
+   *
+   * `'*'` 与 `undefined` 都表示"不约束版本"；提供者未声明版本时，非 `*` 的范围一律不满足
+   * （fail-closed：说不清版本就不算满足）。
+   */
+  #assertRangeSatisfied(
+    name: ServiceName,
+    provider: ServiceProviderRecord,
+    range: string | undefined,
+  ): void {
+    if (range === undefined || range === '*') return
+    if (!satisfies(provider.version ?? '', range)) {
+      throw new ServiceVersionMismatchError(name, range, provider.version)
+    }
   }
 
   /**

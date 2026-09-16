@@ -6,6 +6,7 @@ import { PluginIntegrityError, verifyPluginArtifact } from '../integrity.ts'
 import { buildExecArgv, toIsolatedPermissions, type ExecArgvPlan } from './permissions.ts'
 import {
   PROTOCOL_VERSION,
+  assertCloneableArgs,
   errorToWire,
   type ChildToHost,
   type HostToChild,
@@ -102,6 +103,12 @@ export interface IsolatedLoaderOptions {
   readonly publicKeyPem: string | undefined
   readonly readyTimeoutMs?: number
   readonly disposeTimeoutMs?: number
+  /**
+   * 整栈回收总预算（毫秒）；`0`/缺省 = 不设预算。
+   * 必须与 `PluginHost.disposeBudgetMs` 用同一个配置值 —— 否则同进程与隔离两种模式的
+   * "卸载最坏耗时"会不一致，而这是 ADR-0015 明确要消除的东西。
+   */
+  readonly disposeBudgetMs?: number
   readonly usePermissionModel?: boolean
   readonly onLog?: (message: string) => void
   /** 测试可注入，用来断言 execArgv 的推导结果。 */
@@ -140,7 +147,11 @@ function createRemoteServiceInstance(
               `提供者声明的方法：${methods.length === 0 ? '<无>' : methods.join(', ')}`,
           )
         }
-        return (...args: unknown[]): Promise<unknown> => call(property, args)
+        return async (...args: unknown[]): Promise<unknown> => {
+          // 前置校验：错误必须出现在**调用点**，而不是 IPC 层的 DataCloneError（ADR-0019）。
+          assertCloneableArgs(service, property, args)
+          return await call(property, args)
+        }
       },
     },
   )
@@ -148,7 +159,13 @@ function createRemoteServiceInstance(
 
 /** 隔离会话向外暴露的服务路由（由 loader 实现并注入）。 */
 interface IsolatedServiceRouter {
-  provide(pluginId: string, name: string, version: string | undefined, methods: readonly string[]): Disposable
+  provide(
+    pluginId: string,
+    name: string,
+    version: string | undefined,
+    methods: readonly string[],
+    conflict: 'exclusive' | 'last-wins',
+  ): Disposable
   revoke(pluginId: string, name: string): void
   use(consumerId: string, name: string, effects: EffectScopeApi): readonly string[]
   invoke(name: string, method: string, args: readonly unknown[]): Promise<unknown>
@@ -193,7 +210,8 @@ export class IsolatedPluginLoader {
   constructor(options: IsolatedLoaderOptions) {
     this.#options = options
     this.#router = {
-      provide: (pluginId, name, version, methods) => this.#provideRemote(pluginId, name, version, methods),
+      provide: (pluginId, name, version, methods, conflict) =>
+        this.#provideRemote(pluginId, name, version, methods, conflict),
       revoke: (pluginId, name) => this.#revokeRemote(pluginId, name),
       use: (consumerId, name, effects) => this.#useRemote(consumerId, name, effects),
       invoke: async (name, method, args) => await this.#invokeRemote(name, method, args),
@@ -210,6 +228,7 @@ export class IsolatedPluginLoader {
     name: string,
     version: string | undefined,
     methods: readonly string[],
+    conflict: 'exclusive' | 'last-wins',
   ): Disposable {
     this.#remoteServices.set(name, { providerId: pluginId, methods })
     const instance = createRemoteServiceInstance(name, methods, (method, args) =>
@@ -217,6 +236,9 @@ export class IsolatedPluginLoader {
     )
     const handle = this.#options.registry.provide(pluginId, name, instance, {
       ...(version === undefined ? {} : { version }),
+      // 冲突策略必须跨进程传过来（ADR-0019）：丢掉它的话，隔离插件写
+      // `conflict: 'last-wins'` 会被静默当成 exclusive —— 又一个"声明了却不生效"。
+      conflict,
       remote: true,
     })
     let disposed = false
@@ -252,7 +274,13 @@ export class IsolatedPluginLoader {
           '两个选择：把提供者也改成 trust: untrusted，或让消费者改用 trust: trusted。',
       )
     }
-    const edge = this.#options.registry.depend(consumerId, name, 'hard')
+    // 版本协商（ADR-0019）：权威数据在**宿主**——子进程里的 manifest 是 stub（没有 dependencies），
+    // 所以这里用宿主持有的 plugin.json 声明，在"取用点"再强制一次。
+    // 不复用加载前的依赖预检：预检是"能不能启动"，这里是"现在拿到的这个提供者是否满足契约"。
+    const range = this.#sessions.get(consumerId)?.declaredDependencies[name]
+    this.#options.registry.assertSatisfies(name, range)
+
+    const edge = this.#options.registry.depend(consumerId, name, 'hard', range)
     effects.add(() => edge.dispose(), `depend:async:${name}`)
     return this.#remoteServices.get(name)?.methods ?? []
   }
@@ -311,6 +339,7 @@ export class IsolatedPluginLoader {
           workerPath: this.#options.workerPath,
           readyTimeoutMs: this.#options.readyTimeoutMs ?? 10_000,
           disposeTimeoutMs: this.#options.disposeTimeoutMs ?? 2_000,
+          disposeBudgetMs: this.#options.disposeBudgetMs ?? 0,
           log: (message) => this.#log(message),
         })
         ref.session = session
@@ -366,6 +395,8 @@ interface SessionOptions {
   readonly workerPath: string
   readonly readyTimeoutMs: number
   readonly disposeTimeoutMs: number
+  /** 整栈回收总预算；`0` = 不设（随 activate 消息下发给子进程的 EffectStack）。 */
+  readonly disposeBudgetMs: number
   readonly log: (message: string) => void
 }
 
@@ -411,6 +442,16 @@ class IsolatedSession {
   }
 
   /**
+   * 该插件 `plugin.json#dependencies` 的声明（服务名 → 版本范围）。
+   *
+   * 隔离消费者的 `services.use` 只带服务名；版本范围必须在**宿主**这一侧解析 ——
+   * 子进程里的 manifest 是 stub（`version: '0.0.0'`、没有 dependencies），不可信也不完整。
+   */
+  get declaredDependencies(): Readonly<Record<string, string>> {
+    return this.#options.entry.manifest.dependencies
+  }
+
+  /**
    * 把宿主侧的 EffectStack 交给会话。
    *
    * 用途只有一个但很关键：隔离消费者调用 `ctx.async.useService` 时，
@@ -429,7 +470,15 @@ class IsolatedSession {
     const requestId = ++this.#serviceRequestSeq
     const pending = deferred<unknown>()
     this.#serviceInvokes.set(requestId, pending)
-    this.#send({ kind: 'invokeService', requestId, service, method, args })
+    if (!this.#send({ kind: 'invokeService', requestId, service, method, args })) {
+      // 同 invokeCommand：发不出去必须变成一次失败应答，而不是让消费者永远等待。
+      this.#serviceInvokes.delete(requestId)
+      pending.reject(
+        new Error(
+          `调用 ${service}.${method}() 的请求无法发送到插件 ${this.#pluginId} 的子进程（参数可能无法 structured clone）`,
+        ),
+      )
+    }
     return await pending.promise
   }
 
@@ -470,6 +519,14 @@ class IsolatedSession {
 
     this.#exited.promise.catch(() => undefined)
     child.on('exit', (code, signal) => {
+      // 子进程**异常退出**（崩溃、被外部杀掉）时不会走 kill() 那条优雅路径，
+      // 所以在途调用必须在**这里**也失败一次：否则消费者会永远等一个已经死掉的进程
+      // （ADR-0019 决策 5 的另一半；kill() 里的 #failAll 只覆盖宿主主动卸载）。
+      // 反向验证过：去掉这行，`isolation.spec.ts` 的"子进程异常退出"用例会以
+      // "在途调用必须被拒绝，而不是永远挂起"失败。
+      this.#failAll(
+        `插件 ${this.#pluginId} 的子进程已退出（退出码 ${code ?? 'null'} / 信号 ${signal ?? 'none'}），在途调用无法完成`,
+      )
       this.#cleanupHostSide()
       const detail = `退出码 ${code ?? 'null'} / 信号 ${signal ?? 'none'}`
       if (!this.#closed) this.#options.log(`[${this.#pluginId}] 子进程退出（${detail}）`)
@@ -496,6 +553,7 @@ class IsolatedSession {
       workspaceFolders: this.#options.hostApi.workspaceFolders(),
       configSnapshot,
       disposeTimeoutMs: this.#options.disposeTimeoutMs,
+      disposeBudgetMs: this.#options.disposeBudgetMs,
     })
 
     if (configuration !== undefined) {
@@ -519,7 +577,13 @@ class IsolatedSession {
     const requestId = ++this.#requestSeq
     const pending = deferred<unknown>()
     this.#invokes.set(requestId, pending)
-    this.#send({ kind: 'invoke', requestId, command, args })
+    if (!this.#send({ kind: 'invoke', requestId, command, args })) {
+      // 发不出去就必须给出失败应答：否则 executeCommand 的调用方永远等下去。
+      this.#invokes.delete(requestId)
+      pending.reject(
+        new Error(`执行命令 ${command} 的请求无法发送到插件 ${this.#pluginId} 的子进程（可能无法 structured clone）`),
+      )
+    }
     return await pending.promise
   }
 
@@ -553,11 +617,20 @@ class IsolatedSession {
 
   // ————————————————————————————————— 内部
 
-  #send(message: HostToChild): void {
+  /**
+   * 发送一条宿主 → 子进程消息；返回是否真的发出去了。
+   *
+   * 返回值不是装饰：`serialization: 'advanced'` 下遇到无法序列化的值会在 `send()` 里抛错，
+   * 而调用方（`invokeServiceMethod` / `invokeCommand`）必须把"发不出去"变成一次**明确的失败应答**，
+   * 否则等待方会永远挂起（活锁）。
+   */
+  #send(message: HostToChild): boolean {
     try {
       this.#child?.send(message)
+      return true
     } catch (error) {
       this.#options.log(`[${this.#pluginId}] 向子进程发送消息失败：${errorToWire(error)}`)
+      return false
     }
   }
 
@@ -752,7 +825,15 @@ class IsolatedSession {
           const rawVersion = call.args[1]
           const version = rawVersion === null || rawVersion === undefined ? undefined : String(rawVersion)
           const methods = Array.isArray(call.args[2]) ? (call.args[2] as unknown[]).map((item) => String(item)) : []
-          const disposable = this.#options.services.provide(this.#pluginId, name, version, methods)
+          // 未知策略 fail-closed：静默回退到 exclusive 是"声明了却不生效"的温床。
+          const rawConflict = call.args[3]
+          if (rawConflict !== undefined && rawConflict !== null && rawConflict !== 'exclusive' && rawConflict !== 'last-wins') {
+            throw new Error(
+              `未知的服务冲突策略 "${String(rawConflict)}"：只支持 'exclusive' 与 'last-wins'（ADR-0007 决策 3）。`,
+            )
+          }
+          const conflict = rawConflict === 'last-wins' ? 'last-wins' : 'exclusive'
+          const disposable = this.#options.services.provide(this.#pluginId, name, version, methods, conflict)
           this.#providedServiceDisposables.set(name, disposable)
           this.#reply(call.id, undefined)
           break

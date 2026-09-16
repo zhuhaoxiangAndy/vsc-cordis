@@ -25,6 +25,9 @@ export { isValidRange, parseVersion, satisfies } from './semver-mini.ts'
 export { KERNEL_PERMISSIONS, isKnownPermission } from './permissions.ts'
 export { TimeoutError, withTimeout } from './timing.ts'
 
+export { formatCloneProblem, inspectCloneable } from './cloneable.ts'
+export type { CloneProblem } from './cloneable.ts'
+
 export {
   InvalidManifestError,
   IsolationUnavailableError,

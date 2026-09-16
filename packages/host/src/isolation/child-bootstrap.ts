@@ -3,6 +3,8 @@ import { EffectStack } from '@vscordis/kernel'
 import { resolvePluginExport, type AsyncService, type AsyncTextDocument, type CordisPlugin, type Disposable, type LogLevel, type Permission, type PluginContext, type PluginVscodeApi, type ProvideOptions, type ServiceName } from '@vscordis/sdk'
 import {
   PROTOCOL_VERSION,
+  assertCloneableArgs,
+  describeCloneProblem,
   errorToWire,
   unsupportedReason,
   type ChildToHost,
@@ -92,7 +94,11 @@ function createRemoteServiceProxy<T>(service: string, methods: readonly string[]
               `提供者声明的方法：${methods.length === 0 ? '<无>' : methods.join(', ')}`,
           )
         }
-        return (...args: unknown[]): Promise<unknown> => callHost('services.invoke', [service, property, args])
+        return async (...args: unknown[]): Promise<unknown> => {
+          // 前置校验：把"IPC 层才炸、且不告诉你哪个参数"变成调用点就能读懂的错误（ADR-0019）。
+          assertCloneableArgs(service, property, args)
+          return await callHost('services.invoke', [service, property, args])
+        }
       },
     },
   ) as AsyncService<T>
@@ -107,7 +113,16 @@ function callHost(method: HostMethod, args: readonly unknown[]): Promise<unknown
   const id = ++callSeq
   return new Promise<unknown>((resolve, reject) => {
     pendingCalls.set(id, { resolve, reject })
-    send({ kind: 'call', id, method, args })
+    try {
+      send({ kind: 'call', id, method, args })
+    } catch (error) {
+      // structured clone 兜底：函数/类实例已被前置校验拦下，但 Proxy 之类的值在纯 JS 里认不出来。
+      // 不删掉 pending 的话，请求会永远挂在表里（消费者等一个永不到来的响应）。
+      pendingCalls.delete(id)
+      reject(
+        new Error(`请求 ${method} 无法发送到宿主（参数可能无法通过 structured clone）：${errorToWire(error)}`),
+      )
+    }
   })
 }
 
@@ -649,11 +664,25 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
     use: () => notSupported('services.syncConsumer'),
     tryUse: () => notSupported('services.syncConsumer'),
     provide: <T,>(name: ServiceName, service: T, options?: ProvideOptions): Disposable => {
+      // `remote` 是运行时的标注：隔离提供者由宿主注册时自动置位。允许插件设置会让
+      // "我不是远程"变成插件说了算 —— 明确拒绝比静默忽略强。
+      if (options?.remote === true) {
+        throw new Error(
+          'ctx.provide 的 remote 标记由运行时写入（隔离提供者注册到宿主时会自动标记），插件不得自行设置（ADR-0019）。',
+        )
+      }
       // 方法表就是这份"IDL-lite"：没有它，消费者的代理无法区分方法与数据字段，
       // 只能对任何属性都返回一个函数 —— 那会把打字错误变成"调用了一个不存在的方法"。
       const methods = listMethods(service)
       trackHostCall(
-        callHost('services.provide', [name, options?.version ?? null, methods]),
+        callHost('services.provide', [
+          name,
+          options?.version ?? null,
+          methods,
+          // 冲突策略必须一起过去：丢了它，`conflict: 'last-wins'` 会在宿主侧
+          // 被静默当成默认的 exclusive（ADR-0019 / 0017 的"声明必须生效"原则）。
+          options?.conflict ?? 'exclusive',
+        ]),
         `提供服务 ${name}`,
       )
       localServices.set(name, service)
@@ -690,6 +719,8 @@ async function activate(message: Extract<HostToChild, { kind: 'activate' }>): Pr
     const stack = new EffectStack({
       label: message.pluginId,
       disposeTimeoutMs: message.disposeTimeoutMs,
+      // 与同进程插件用同一份预算配置：隔离插件的一堆挂死 teardown 同样不许拖垮卸载。
+      disposeBudgetMs: message.disposeBudgetMs,
       onError: (error, label) => {
         log('error', `副作用回收失败：${label ?? '<未命名>'} ${errorToWire(error)}`)
       },
@@ -765,7 +796,32 @@ function invokeLocalService(message: Extract<HostToChild, { kind: 'invokeService
   void Promise.resolve()
     .then(() => (candidate as (...args: unknown[]) => unknown).apply(instance, [...message.args]))
     .then(
-      (value) => send({ kind: 'serviceResult', requestId: message.requestId, ok: true, value }),
+      (value) => {
+        // 返回值也要前置校验：否则消费者拿到的错误来自 IPC 层（没说是哪个方法），
+        // 或者更糟 —— 类实例悄悄丢了原型与方法（ADR-0019）。
+        const problem = describeCloneProblem(
+          `服务 "${message.service}" 的方法 "${message.method}" 的返回值`,
+          value,
+        )
+        if (problem !== undefined) {
+          send({ kind: 'serviceResult', requestId: message.requestId, ok: false, error: problem })
+          return
+        }
+        try {
+          send({ kind: 'serviceResult', requestId: message.requestId, ok: true, value })
+        } catch (error) {
+          // 兜底：Proxy 等 precheck 认不出的值。发送失败也必须给出应答，
+          // 否则宿主会永远等这个 requestId（活锁）。
+          send({
+            kind: 'serviceResult',
+            requestId: message.requestId,
+            ok: false,
+            error:
+              `服务 "${message.service}" 的方法 "${message.method}" 的返回值无法通过 IPC 序列化：` +
+              errorToWire(error),
+          })
+        }
+      },
       (error: unknown) =>
         send({ kind: 'serviceResult', requestId: message.requestId, ok: false, error: errorToWire(error) }),
     )

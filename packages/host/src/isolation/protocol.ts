@@ -1,3 +1,4 @@
+import { formatCloneProblem, inspectCloneable } from '@vscordis/kernel'
 import type { LogLevel } from '@vscordis/sdk'
 
 /**
@@ -98,6 +99,14 @@ export type HostToChild =
       /** 按 `plugin.json#configuration` 预取的配置**快照**（键 → 值）。 */
       readonly configSnapshot: Readonly<Record<string, unknown>>
       readonly disposeTimeoutMs: number
+      /**
+       * 整栈回收的总时长预算（ADR-0015 已知缺口 1）。
+       *
+       * `0` = 不设预算（子进程侧 EffectStack 的既有语义）。宿主必须把它传下来，
+       * 否则"总时长有界"只对同进程插件成立 —— 隔离插件的 50 个挂死 teardown
+       * 照样能让子进程的卸载拖到 N × 单项超时。
+       */
+      readonly disposeBudgetMs: number
     }
   /**
    * 配置变化推送。
@@ -143,6 +152,32 @@ export type ChildToHost =
 export function errorToWire(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`
   return String(error)
+}
+
+/**
+ * 调用点前置校验：参数必须能被 structured clone（ADR-0019 未覆盖第 1 条的补齐）。
+ *
+ * 为什么必须在**调用点**做：IPC 用 `serialization: 'advanced'`，不可克隆的值会在传输层抛
+ * `DataCloneError`，错误里既没有"第几个参数"也没有路径；类实例更糟 —— 它**不报错**，
+ * 但原型与方法被静默丢掉。这里把问题变成一条能直接照着改的错误。
+ *
+ * 同进程消费者代理（宿主侧）与隔离消费者代理（子进程侧）共用它，保证文案一致。
+ */
+export function assertCloneableArgs(service: string, method: string, args: readonly unknown[]): void {
+  for (let index = 0; index < args.length; index += 1) {
+    const problem = inspectCloneable(args[index])
+    if (problem !== undefined) {
+      throw new Error(
+        formatCloneProblem(`远程服务 "${service}" 的方法 "${method}" 的第 ${index} 个参数`, problem),
+      )
+    }
+  }
+}
+
+/** 返回值方向的同一套校验；可克隆时返回 `undefined`。 */
+export function describeCloneProblem(what: string, value: unknown): string | undefined {
+  const problem = inspectCloneable(value)
+  return problem === undefined ? undefined : formatCloneProblem(what, problem)
 }
 
 /**

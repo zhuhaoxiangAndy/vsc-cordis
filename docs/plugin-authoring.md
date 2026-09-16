@@ -152,6 +152,9 @@ ctx.effect(() => item, (i) => i.dispose(), 'status:my-plugin')
    写 `if (done) return; done = true`。
 3. **在 `activate` 里起长任务却不监听 `ctx.signal`**。宿主无法强制中断你的 Promise；
    超时只是"不再等你"，你的任务会继续跑到自生自灭 —— 那通常表现为"卸载后还有残留行为"。
+   另外宿主对**整栈副作用回收**有总预算（设置 `vscordis.disposeBudgetMs`，默认 30s）：
+   预算耗尽后剩余的 teardown 会被**跳过**并在日志里逐项记录（`预算耗尽`），
+   所以别写一堆会挂死的 teardown —— 它们会连累同一插件里排在后面的清理（ADR-0015）。
 4. **依赖了一个没人提供的服务**。你的插件会被静默 `paused`（不是 failed），
    命令随之从列表里消失。状态面板会显示 `等待依赖：xxx`。这是设计行为，不是故障。
 5. **`provides` 声明与实际不符**。`vscordis tree` 画的是声明值，宿主会在激活后比对并告警。
@@ -160,6 +163,16 @@ ctx.effect(() => item, (i) => i.dispose(), 'status:my-plugin')
    初始化逻辑写进 `activate()`，不要写在顶层。
 7. **在隔离模式里用 `import * as vscode from 'vscode'`**。构建期会直接报错 ——
    请用 `ctx.vscode`。这是有意为之：受控 API 是唯一通路。
+8. **给远程服务传不可克隆的值（函数、Symbol、Promise、类实例）**。跨进程走 structured clone：
+   函数/`Symbol`/`Promise` 过不去；类实例更隐蔽 —— 它能过，但原型与方法被**静默丢掉**。
+   现在宿主在**调用点**就会给出带路径的错误，例如：
+   `远程服务 "clock" 的方法 "setAlarm" 的第 0 个参数 不可 structured clone：.onTick 是函数…`
+   （返回值方向同理）。要回调就留在本进程，用命令/事件驱动远程那一侧。
+9. **`plugin.json#dependencies` 里的版本范围与提供者版本不符**。这个范围**会被强制**：
+   `ctx.use` / `ctx.tryUse` / `ctx.async.useService` 以及隔离模式的取用点都会检查；
+   不满足时**响亮失败**（错误信息给出"换提供者版本 / 放宽范围"两条出路），
+   而不是让你拿到一个不兼容的对象。隔离提供者之间也可以显式
+   `ctx.provide(name, obj, { conflict: 'last-wins' })` —— 这个策略现在会跨进程传到宿主注册表。
 
 ## 7. 调试手册
 

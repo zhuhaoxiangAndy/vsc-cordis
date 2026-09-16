@@ -314,7 +314,10 @@ after(async () => {
   await stop()
 })
 
-async function makeHost(hostApi: FakeHostApi): Promise<{ host: PluginHost; loader: IsolatedPluginLoader }> {
+async function makeHost(
+  hostApi: FakeHostApi,
+  overrides: { readonly disposeBudgetMs?: number } = {},
+): Promise<{ host: PluginHost; loader: IsolatedPluginLoader }> {
   const workerPath = await ensureWorker()
   // 注册表必须由测试显式创建并与 PluginHost **共用**：隔离加载器要往同一张表里
   // 注册远程服务，否则消费者登记的依赖边与提供者的条目就不在同一张图上。
@@ -326,9 +329,15 @@ async function makeHost(hostApi: FakeHostApi): Promise<{ host: PluginHost; loade
     publicKeyPem: undefined,
     readyTimeoutMs: 15_000,
     disposeTimeoutMs: 3_000,
+    disposeBudgetMs: overrides.disposeBudgetMs ?? 0,
   })
   const port = new IsolationPort(loader)
-  const host = new PluginHost({ port, registry, disposeTimeoutMs: 4_000 })
+  const host = new PluginHost({
+    port,
+    registry,
+    disposeTimeoutMs: 4_000,
+    disposeBudgetMs: overrides.disposeBudgetMs ?? 0,
+  })
   createdHosts.push(host)
   return { host, loader }
 }
@@ -975,6 +984,329 @@ test('ADR-0019：用同进程消费者取用远程服务时也必须走异步面
     // resolveForAsync 是给 ctx.async.useService 用的，它接受远程服务
     const instance = host.registry.resolveForAsync<{ now(): Promise<string> }>('clock')
     assert.equal(await instance.now(), 'now-from-provider-child')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：隔离消费者的声明版本范围会落到宿主依赖边，并在取用点强制', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture('svc-range-provider', CLOCK_PROVIDER)
+  const consumer = await makeFixture('svc-range-consumer', CLOCK_CONSUMER, {
+    permissions: ['vscode:commands.register'],
+    dependencies: { clock: '^1.0.0' },
+  })
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.load(consumer)
+    await host.settle()
+    assert.equal(host.view('svc-range-consumer')?.state, 'active')
+
+    const edge = host.registry
+      .snapshot()
+      .edges.find((item) => item.consumer === 'svc-range-consumer' && item.service === 'clock')
+    assert.equal(edge?.range, '^1.0.0', 'services.use 必须把消费者声明的范围登记到宿主的依赖边上')
+
+    // 强制原语对远程服务同样生效（取用点复查的就是它）
+    assert.doesNotThrow(() => host.registry.assertSatisfies('clock', '^1.0.0'))
+    assert.throws(() => host.registry.assertSatisfies('clock', '^2.0.0'), (error: unknown) => {
+      assert.match(String(error), /不满足范围/)
+      assert.match(String(error), /放宽依赖方 plugin\.json#dependencies/)
+      return true
+    })
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：声明范围不满足时隔离消费者停在 paused，且不为它启动子进程', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture('svc-gate-provider', CLOCK_PROVIDER)
+  const consumer = await makeFixture('svc-gate-consumer', CLOCK_CONSUMER, {
+    permissions: ['vscode:commands.register'],
+    dependencies: { clock: '^2.0.0' }, // 提供者是 1.0.0
+  })
+
+  const { host, loader } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.load(consumer)
+    await host.settle()
+
+    assert.equal(host.view('svc-gate-consumer')?.state, 'paused')
+    assert.deepEqual(host.view('svc-gate-consumer')?.missing, ['clock'])
+    assert.equal(loader.activeSessions, 1, '范围不满足的消费者连子进程都不该起（只有提供者一个会话）')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：隔离提供者之间显式 last-wins 生效（冲突策略必须跨进程传递）', async () => {
+  const hostApi = new FakeHostApi()
+  const providerSource = (value: string, conflict?: boolean): string =>
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('greeting', { hello: () => '${value}' }, { version: '1.0.0'${
+           conflict === true ? ", conflict: 'last-wins'" : ''
+         } })
+       },
+     }\n`
+  const first = await makeFixture('svc-lw-a', providerSource('from-a'))
+  const second = await makeFixture('svc-lw-b', providerSource('from-b', true))
+  const consumer = await makeFixture(
+    'svc-lw-consumer',
+    `module.exports = {
+       activate: async (ctx) => {
+         const greeting = await ctx.async.useService('greeting')
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('greet.call', async () => await greeting.hello()),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(first)
+    await host.load(consumer)
+    await host.settle()
+    assert.equal(await hostApi.executeCommand('svc-lw-consumer', 'greet.call', []), 'from-a')
+
+    // B 显式 last-wins 接管：注册表换人，消费者被级联重启后拿到 B
+    await host.load(second)
+    await host.settle()
+    const service = host.registry.snapshot().services.find((item) => item.name === 'greeting')
+    assert.equal(service?.provider?.owner, 'svc-lw-b')
+    assert.equal(service?.provider?.remote, true)
+    assert.equal(await hostApi.executeCommand('svc-lw-consumer', 'greet.call', []), 'from-b')
+
+    // 缺省仍是 exclusive：第三个提供者必须响亮失败，而不是悄悄覆盖
+    const third = await makeFixture('svc-lw-c', providerSource('from-c'))
+    await assert.rejects(host.load(third), (error: unknown) => {
+      assert.match(String(error), /不得重复提供/)
+      assert.match(String(error), /conflict: 'last-wins'/)
+      return true
+    })
+    await host.settle()
+    assert.equal(host.view('svc-lw-c')?.state, 'failed')
+    assert.equal(host.registry.snapshot().services.find((item) => item.name === 'greeting')?.provider?.owner, 'svc-lw-b')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：隔离插件也不能自设 provide 的 remote 标记（响亮失败）', async () => {
+  const hostApi = new FakeHostApi()
+  const liar = await makeFixture(
+    'svc-remote-liar',
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('fake-remote', { ping: () => 'pong' }, { remote: true })
+       },
+     }\n`,
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await assert.rejects(host.load(liar), (error: unknown) => {
+      assert.match(String(error), /remote 标记由运行时写入/)
+      return true
+    })
+    await host.settle()
+    assert.equal(host.view('svc-remote-liar')?.state, 'failed')
+    assert.equal(host.registry.size, 0, '失败后不能留下服务槽位')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：提供者子进程异常退出时，宿主持有的在途调用必须被拒绝（不能永远等待）', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture(
+    'svc-die-provider',
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('dying', { hang: () => process.exit(7) }, { version: '1.0.0' })
+       },
+     }\n`,
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.settle()
+
+    // 刻意**绕过插件依赖边**：直接拿宿主侧的远程代理。否则提供者退出会先级联暂停消费者、
+    // 由"消费者会话被终止"来 reject —— 那样即使 exit 处理器漏了 #failAll，用例也照样通过（假绿）。
+    const proxy = host.registry.resolveForAsync<{ hang(): Promise<unknown> }>('dying')
+
+    // 用 race 而不是裸 await：没有 #failAll 时这个 Promise 永远不会 settle，
+    // 裸 await 会让整轮测试挂死（"超时"而不是"失败"）。这里把它变成一条可读的断言。
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<{ kind: 'timeout' }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: 'timeout' }), 3_000)
+    })
+    try {
+      const settled = await Promise.race([
+        proxy.hang().then(
+          () => ({ kind: 'resolved' as const }),
+          (error: unknown) => ({ kind: 'rejected' as const, error }),
+        ),
+        timeout,
+      ])
+      if (settled.kind === 'timeout') assert.fail('在途调用在提供者子进程崩溃后必须被拒绝，而不是永远挂起')
+      if (settled.kind === 'resolved') assert.fail('调用不该成功：方法在应答前就带走了整个进程')
+      assert.match(String(settled.error), /已退出/)
+      assert.match(String(settled.error), /退出码 7/)
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：参数不可 structured clone 时，错误出现在调用点并给出路径', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture(
+    'svc-clone-provider',
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('clock', { setHandler: (handler) => typeof handler }, { version: '1.0.0' })
+       },
+     }\n`,
+  )
+  const consumer = await makeFixture(
+    'svc-clone-consumer',
+    `module.exports = {
+       activate: async (ctx) => {
+         const clock = await ctx.async.useService('clock')
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('clone.call', async () =>
+             await clock.setHandler({ onTick: () => 1 })),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'], dependencies: { clock: '^1.0.0' } },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.load(consumer)
+    await host.settle()
+
+    // 子进程侧的代理：错误必须说清"哪个方法、第几个参数、哪条路径、为什么"
+    await assert.rejects(
+      hostApi.executeCommand('svc-clone-consumer', 'clone.call', []),
+      (error: unknown) => {
+        const text = String(error)
+        assert.match(text, /方法 "setHandler" 的第 0 个参数/)
+        assert.match(text, /\.onTick/)
+        assert.match(text, /是函数/)
+        return true
+      },
+    )
+
+    // 宿主侧的代理（同进程消费者走的就是它）：同样的前置校验，而不是把 DataCloneError 甩出去
+    const proxy = host.registry.resolveForAsync<{ setHandler(handler: unknown): Promise<unknown> }>('clock')
+    await assert.rejects(proxy.setHandler({ onTick: () => 1 }), /第 0 个参数/)
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：返回值不可 structured clone 时，错误指出服务、方法与"返回值"', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture(
+    'svc-clone-ret-provider',
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('clock', { makeHandler: () => ({ onTick: () => 1 }) }, { version: '1.0.0' })
+       },
+     }\n`,
+  )
+  const consumer = await makeFixture(
+    'svc-clone-ret-consumer',
+    `module.exports = {
+       activate: async (ctx) => {
+         const clock = await ctx.async.useService('clock')
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('clone.ret', async () => await clock.makeHandler()),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'], dependencies: { clock: '^1.0.0' } },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.load(consumer)
+    await host.settle()
+
+    await assert.rejects(
+      hostApi.executeCommand('svc-clone-ret-consumer', 'clone.ret', []),
+      (error: unknown) => {
+        const text = String(error)
+        assert.match(text, /方法 "makeHandler" 的返回值/)
+        assert.match(text, /\.onTick/)
+        assert.match(text, /是函数/)
+        return true
+      },
+    )
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+// ————————————————————————————————— ADR-0015：整栈回收预算
+
+test('ADR-0015：隔离插件的回收预算随 activate 下发给子进程（超预算后跳过并留下记录）', async () => {
+  const hostApi = new FakeHostApi()
+  const fixture = await makeFixture(
+    'budget-child',
+    `module.exports = {
+       activate(ctx) {
+         // LIFO：后登记的先回收。fast 排在挂死项后面，预算被吃光后它应当被**跳过**。
+         ctx.onDispose(() => undefined, 'fast')
+         ctx.onDispose(() => new Promise(() => {}), 'hang')
+       },
+     }\n`,
+  )
+
+  const { host } = await makeHost(hostApi, { disposeBudgetMs: 60 })
+  try {
+    await host.load(fixture)
+    await host.settle()
+
+    const started = Date.now()
+    await host.unload('budget-child')
+    await host.settle()
+    const elapsed = Date.now() - started
+
+    // 没有预算时这里会等满单项超时（3s）才轮到 fast；有预算必须远快于它。
+    assert.ok(elapsed < 2_000, `隔离插件卸载必须受预算约束，实际 ${elapsed}ms`)
+    const logs = hostApi.logs.map((entry) => entry.message).join('\n')
+    assert.match(logs, /预算耗尽/)
+    assert.match(logs, /fast/, '被跳过的项必须留下可检索的记录（不能静默 break）')
   } finally {
     await host.unloadAll().catch(() => undefined)
     await host.settle()

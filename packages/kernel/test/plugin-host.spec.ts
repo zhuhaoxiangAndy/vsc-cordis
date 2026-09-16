@@ -364,3 +364,70 @@ test('deactivate 抛错不阻断回收', async () => {
   assert.equal(stackRef.current?.size, 0)
   assert.ok(port.logsFor('rude').some((message) => message.includes('deactivate() 抛错')))
 })
+
+test('ctx.provide 的 remote 标记不可由插件设置：响亮失败而不是得到"假远程服务"', async () => {
+  const port = new FakeHostPort()
+  port.define('liar', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.provide('fake-remote', { ping: () => 'pong' }, { remote: true })
+    },
+  }))
+
+  const host = hostFor(port)
+  await assert.rejects(host.load(makeEntry('liar')), (error: unknown) => {
+    assert.match(String(error), /remote 标记由运行时写入/)
+    return true
+  })
+  await host.settle()
+
+  // 失败要彻底：状态是 failed，注册表里不能留下这个服务，也不能留下空槽位
+  assert.equal(host.view('liar')?.state, 'failed')
+  assert.deepEqual(host.registry.providedServices(), [])
+  assert.equal(host.registry.size, 0)
+})
+
+test('disposeBudgetMs：预算耗尽后跳过剩余 teardown，并逐项记日志（ADR-0015 接线）', async () => {
+  const port = new FakeHostPort()
+  const ran: string[] = []
+  port.define('budgeted', (): CordisPlugin => ({
+    activate(ctx) {
+      // LIFO：后登记的先回收。这里刻意用一个**同步**忙碌项吃掉预算 ——
+      // 同步 teardown 无法被预算打断，而预算只在"项与项之间"检查（ADR-0015 的边界），
+      // 于是第二项的跳过是确定性的，不依赖 timer 的毫秒级竞态。
+      ctx.onDispose(() => {
+        ran.push('fast')
+      }, 'fast')
+      ctx.onDispose(() => {
+        const until = Date.now() + 80
+        while (Date.now() < until) {
+          // 忙等：故意同步占用 80ms，远超下面的 20ms 预算
+        }
+      }, 'busy')
+    },
+  }))
+
+  const host = new PluginHost({
+    port,
+    disposeTimeoutMs: 100,
+    disposeBudgetMs: 20,
+    activationTimeoutMs: 2_000,
+  })
+  await host.load(makeEntry('budgeted'))
+  await host.settle()
+
+  const started = Date.now()
+  await host.unload('budgeted')
+  await host.settle()
+  const elapsed = Date.now() - started
+
+  assert.deepEqual(ran, [], '预算耗尽后 fast 不应执行（这是刻意的取舍：宁可少回收并留记录）')
+  assert.ok(elapsed < 2_000, `卸载必须受预算约束，实际 ${elapsed}ms`)
+  // PluginHost 的 onError 把细节放在结构化 meta 里（message 只含 label），
+  // 所以这里查 meta.error：被跳过的项必须留下"预算耗尽"这个可检索的原因。
+  const details = port.logs
+    .filter((entry) => entry.meta?.plugin === 'budgeted')
+    .map((entry) => String(entry.meta?.error ?? ''))
+    .join('\n')
+  assert.match(details, /预算耗尽/)
+  assert.match(details, /fast/, '被跳过的项必须留下可检索的记录（不能静默 break）')
+})

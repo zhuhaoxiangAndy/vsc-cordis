@@ -52,6 +52,22 @@
 **任何加载失败都必须留下可诊断的 failed 状态**，否则用户看到的是"这个插件好像没被加载过"，
 而真正的原因（版本不兼容）只在那一刻的错误提示里出现过一次。
 
+## 后续轮次补齐：决策 3 的接线曾经是断的（生产路径静默跳过 engines 检查）
+
+`engines` 的强制链有三段：`extension.ts` 读扩展版本 → `Runtime` 装配 → `PluginHost` 检查。
+第三段一开始就没接上：`RuntimeOptions.hostVersion` 有声明、`extension.ts` 也传了，
+但 `Runtime` 构造 `PluginHost` 时**没有把 hostVersion / vscodeVersion 传下去**。
+于是"强制"只存在于 kernel 测试里，真实宿主里的 `engines` 仍然等于没写 ——
+本 ADR 要消灭的那个陷阱，换了个位置又出现了一次。
+
+- 修法：`new PluginHost({...})` 传 `hostVersion: options.hostVersion` 与 `vscodeVersion: vscode.version`。
+- 验证：`packages/host/test/runtime-wiring.spec.ts` 是**接线测试**（不是行为测试）。
+  `runtime.ts` 需要真实 `vscode` 模块、无法在 node:test 里实例化，所以它读源码断言
+  这两个字段确实出现在 `new PluginHost({...})` 的参数列表里；语义仍由
+  `kernel/test/engines.spec.ts` 覆盖（"不满足 → 拒绝"、"未提供版本 → 跳过并记 debug 日志"）。
+- **教训**：可选的注入点（`hostVersion?`）在没有接线测试时，会安静地退回"跳过检查" ——
+  而"跳过"与"通过"在使用者眼里没有区别（本 ADR 决策 3 已经写过这句话）。
+
 ## 未覆盖
 
 - CLI 的 `list` / `tree` **没有**做引擎兼容性检查（它们不读宿主版本）。

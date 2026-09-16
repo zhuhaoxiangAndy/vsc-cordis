@@ -187,3 +187,134 @@ test('dispose() 幂等，且 settled 在回收开始后即为 true', async () =>
   assert.equal(count, 1)
   assert.equal(stack.settled, true)
 })
+
+test('disposeBudgetMs：预算内多个快 teardown 全部执行，skippedByBudget 为 0', async () => {
+  const order: string[] = []
+  const failures: unknown[] = []
+  const stack = new EffectStack({ disposeBudgetMs: 1_000, onError: (error) => void failures.push(error) })
+  stack.add(async () => {
+    await tick(5)
+    order.push('a')
+  }, 'a')
+  stack.add(async () => {
+    await tick(5)
+    order.push('b')
+  }, 'b')
+  stack.add(async () => {
+    await tick(5)
+    order.push('c')
+  }, 'c')
+
+  await stack.dispose()
+
+  assert.deepEqual(order, ['c', 'b', 'a'])
+  assert.deepEqual(failures, [])
+  assert.equal(stack.skippedByBudget, 0)
+  assert.equal(stack.closed, true)
+  assert.equal(stack.size, 0)
+})
+
+test('disposeBudgetMs：被一个慢 teardown 吃光后，剩余项逐个跳过并逐条上报', async () => {
+  const failures: { error: unknown; label: string | undefined }[] = []
+  const executed: string[] = []
+  const stack = new EffectStack({
+    disposeBudgetMs: 40,
+    onError: (error, label) => void failures.push({ error, label }),
+  })
+  stack.add(() => void executed.push('skipped-1'), 'skipped-1')
+  stack.add(() => void executed.push('skipped-2'), 'skipped-2')
+  // LIFO：这一项最先执行，挂起把预算吃光（单项超时被压到剩余预算）。
+  stack.add(() => new Promise<void>(() => { /* 永不 resolve */ }), 'slow')
+
+  const startedAt = Date.now()
+  await stack.dispose()
+  const elapsedMs = Date.now() - startedAt
+
+  const timeoutFailures = failures.filter(({ error }) => /超时/.test(String(error)))
+  const budgetFailures = failures.filter(({ error }) => /预算耗尽/.test(String(error)))
+  assert.equal(timeoutFailures.length, 1)
+  assert.equal(timeoutFailures[0]?.label, 'slow')
+  assert.equal(budgetFailures.length, 2)
+  assert.deepEqual(budgetFailures.map(({ label }) => label), ['skipped-2', 'skipped-1'])
+  for (const { error, label } of budgetFailures) {
+    assert.match(String(error), new RegExp(String(label)))
+    assert.match(String(error), /预算耗尽/)
+  }
+  assert.deepEqual(executed, [])
+  assert.equal(stack.skippedByBudget, 2)
+  assert.equal(stack.closed, true)
+  assert.equal(stack.size, 0)
+  // 总时长预算的意义：若无预算，挂起项会先吃掉默认 5s 单项超时。
+  assert.ok(elapsedMs < 2_000, `整栈回收应被预算压到 2s 内，实际 ${elapsedMs}ms`)
+})
+
+test('disposeBudgetMs：不传或 <= 0 时不启用，长链全部执行且不跳过', async () => {
+  const cases = [{}, { disposeBudgetMs: undefined }, { disposeBudgetMs: 0 }, { disposeBudgetMs: -1 }]
+  const expected = Array.from({ length: 12 }, (_, i) => `#${11 - i}`)
+  for (const options of cases) {
+    const executed: string[] = []
+    const stack = new EffectStack({ ...options, disposeTimeoutMs: 60 })
+    for (let i = 0; i < 12; i += 1) {
+      stack.add(() => void executed.push(`#${i}`), `item-${i}`)
+    }
+    // 栈顶慢项耗掉 30ms：若预算被错误启用（例如按 <= 0 之外的判断），后续 12 项都会被跳过。
+    stack.add(async () => {
+      await tick(30)
+    }, 'slow')
+
+    await stack.dispose()
+
+    assert.deepEqual(executed, expected, JSON.stringify(options))
+    assert.equal(stack.skippedByBudget, 0, JSON.stringify(options))
+    assert.equal(stack.closed, true)
+    assert.equal(stack.size, 0)
+  }
+})
+
+test('disposeBudgetMs：单项 disposeTimeoutMs 仍生效，超时记失败但不阻断', async () => {
+  const executed: string[] = []
+  const failures: unknown[] = []
+  const stack = new EffectStack({
+    disposeBudgetMs: 1_000,
+    disposeTimeoutMs: 20,
+    onError: (error) => void failures.push(error),
+  })
+  stack.add(() => void executed.push('after'), 'after')
+  stack.add(() => new Promise<void>(() => { /* 永不 resolve */ }), 'hang')
+
+  await stack.dispose()
+
+  assert.equal(failures.length, 1)
+  assert.match(String(failures[0]), /超时/)
+  assert.deepEqual(executed, ['after'])
+  assert.equal(stack.skippedByBudget, 0)
+  assert.equal(stack.size, 0)
+})
+
+test('disposeBudgetMs：恰好只够一项时，第二项被剩余预算截断（超时而非跳过）', async () => {
+  const events: string[] = []
+  const failures: unknown[] = []
+  const stack = new EffectStack({ disposeBudgetMs: 400, onError: (error) => void failures.push(error) })
+  stack.add(() => {
+    events.push('second-start')
+    return new Promise<void>(() => { /* 慢 teardown：只能被剩余预算的超时截断 */ })
+  }, 'second')
+  stack.add(async () => {
+    await tick(50)
+    events.push('first-done')
+  }, 'first')
+
+  await stack.dispose()
+
+  assert.deepEqual(events, ['first-done', 'second-start'])
+  assert.equal(failures.length, 1)
+  const message = String(failures[0])
+  assert.match(message, /超时/)
+  const budgeted = /超时（>(\d+)ms）/.exec(message)
+  assert.ok(budgeted, `超时信息应带上被剩余预算截断后的毫秒数：${message}`)
+  const timeoutMs = Number(budgeted[1])
+  assert.ok(timeoutMs >= 1 && timeoutMs <= 400, `单项超时应落在 (0, 400] 内，实际 ${timeoutMs}ms`)
+  assert.equal(stack.skippedByBudget, 0)
+  assert.equal(stack.closed, true)
+  assert.equal(stack.size, 0)
+})

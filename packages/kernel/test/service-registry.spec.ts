@@ -110,3 +110,59 @@ test('snapshot 描述完整的依赖图（用于 CLI 可视化）', () => {
   assert.equal(snapshot.services[0]?.provider?.owner, 'p')
   assert.deepEqual(snapshot.services[0]?.consumers, [{ owner: 'c', kind: 'hard' }])
 })
+
+// ————————————————————————————————— ADR-0019：版本协商
+
+test('tryResolve 同样强制版本范围：版本不符抛错，而不是静默当作缺失', () => {
+  const registry = new ServiceRegistry()
+  registry.provide('p', 'clock', 1, { version: '1.0.0' })
+
+  // 版本不符是"存在但契约不满足"，返回 undefined 会让插件把软依赖误判成"不存在"
+  assert.throws(() => registry.tryResolve('clock', '^2.0.0'), ServiceVersionMismatchError)
+  assert.equal(registry.tryResolve('clock', '^1.0.0'), 1)
+  assert.equal(registry.tryResolve('clock', '*'), 1)
+  assert.equal(registry.tryResolve('clock'), 1)
+  // 真正缺失时仍然是 undefined（这是软依赖的本意）
+  assert.equal(registry.tryResolve('missing', '^1.0.0'), undefined)
+})
+
+test('assertSatisfies：只校验版本、不返回实例；未声明版本时非 * 范围 fail-closed', () => {
+  const registry = new ServiceRegistry()
+  registry.provide('p', 'clock', { secret: 1 }, { version: '1.0.0' })
+  registry.provide('q', 'unversioned', { secret: 2 })
+
+  assert.doesNotThrow(() => registry.assertSatisfies('clock', '^1.0.0'))
+  assert.doesNotThrow(() => registry.assertSatisfies('clock', '*'))
+  assert.doesNotThrow(() => registry.assertSatisfies('clock', undefined))
+  assert.throws(() => registry.assertSatisfies('clock', '^2.0.0'), ServiceVersionMismatchError)
+  // 说不清版本就当作不满足：否则一个忘记声明 version 的提供者会绕过所有版本约束
+  assert.throws(() => registry.assertSatisfies('unversioned', '^1.0.0'), ServiceVersionMismatchError)
+  assert.throws(() => registry.assertSatisfies('missing', '^1.0.0'), ServiceUnavailableError)
+})
+
+test('版本不匹配的错误信息给出替代路径（换提供者版本或放宽范围）', () => {
+  const registry = new ServiceRegistry()
+  registry.provide('p', 'clock', 1, { version: '1.0.0' })
+
+  assert.throws(
+    () => registry.resolve('clock', '^2.0.0'),
+    (error: unknown) => {
+      const text = String(error)
+      assert.match(text, /升级\/降级/)
+      assert.match(text, /放宽依赖方 plugin\.json#dependencies/)
+      return true
+    },
+  )
+})
+
+test('未知冲突策略 fail-closed，而不是静默当作 exclusive', () => {
+  const registry = new ServiceRegistry()
+
+  assert.throws(
+    () => registry.provide('a', 'clock', 1, { conflict: 'first-wins' as never }),
+    /未知的服务冲突策略/,
+  )
+  // 合法的两种策略不应受影响
+  assert.doesNotThrow(() => registry.provide('a', 'clock', 1, { conflict: 'exclusive' }))
+  assert.doesNotThrow(() => registry.provide('b', 'clock', 2, { conflict: 'last-wins' }))
+})

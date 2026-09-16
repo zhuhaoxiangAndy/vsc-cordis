@@ -46,6 +46,11 @@
           "default": 2000,
           "description": "单个副作用（effect）回收的超时时间；超时记入错误但继续回收。"
         },
+        "vscordis.disposeBudgetMs": {
+          "type": "number",
+          "default": 30000,
+          "description": "单个插件整栈副作用回收的总时长预算（毫秒）。每项各自有界不够：几十个挂死的 teardown 就是几十倍单项超时，而生命周期共用一条串行队列，期间宿主整体无响应。超出预算后剩余项不再执行并逐项记入错误日志。设为 0 可关闭（回到旧行为，见 ADR-0015）。"
+        },
         "vscordis.activationTimeoutMs": {
           "type": "number",
           "default": 15000,

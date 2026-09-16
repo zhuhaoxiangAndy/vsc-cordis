@@ -126,9 +126,19 @@ export function createPluginContext(deps: PluginContextDeps): PluginContext {
     },
     tryUse<T>(name: ServiceName): T | undefined {
       registerDependency(name, 'soft')
-      return registry.tryResolve<T>(name)
+      // 软依赖同样受清单声明的版本范围约束（ADR-0019）：版本不满足会抛错而不是
+      // 静默返回 undefined —— "存在但版本不符"不该被当成"软依赖不存在"。
+      return registry.tryResolve<T>(name, manifest.dependencies[name])
     },
     provide<T>(name: ServiceName, service: T, options?: ProvideOptions): Disposable {
+      // `remote` 是运行时的标注，不是插件的选项：隔离提供者由 loader 注册时才置位。
+      // 若允许插件自设，一个同进程服务会变成"同步消费者被拒绝"的假远程服务。
+      if (options?.remote === true) {
+        throw new Error(
+          'ctx.provide 的 remote 标记由运行时写入（只有隔离进程里的提供者才会是 remote），插件不得自行设置。' +
+            '若你的服务确实跑在隔离进程里，注册时宿主会自动标记；若想让消费者用异步面，请让消费者调用 ctx.async.useService（ADR-0019）。',
+        )
+      }
       const handle = registry.provide(id, name, service, options)
       // 双保险：插件显式 dispose 与 EffectStack 回收都会走同一条幂等路径。
       effects.add(() => handle.dispose(), `provide:${name}`)

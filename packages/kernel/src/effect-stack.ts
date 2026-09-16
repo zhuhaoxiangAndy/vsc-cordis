@@ -17,6 +17,18 @@ export interface EffectStackOptions {
   readonly label?: string
   /** 单个 teardown 的超时毫秒数；超时计为失败但继续回收。 */
   readonly disposeTimeoutMs?: number
+  /**
+   * 整栈回收的总预算毫秒数。`undefined` 或 `<= 0` = **不启用**（行为与从前完全一致）。
+   *
+   * 启用后，`dispose()` 开始时算一次 deadline；每项 teardown 执行前检查剩余预算：
+   * - 剩余 `<= 0`：**跳过该项**（teardown 一个回合都不给），逐项经 `onError` 上报，
+   *   并计入 `skippedByBudget`。这是刻意的取舍 —— 用"有些 effect 不再执行"换取
+   *   宿主串行生命周期队列的总回收时长有界；跳过项仍被视为已回收，栈最终
+   *   `closed === true` 且 `size === 0`。
+   * - 剩余 `> 0`：单项超时取 `min(disposeTimeoutMs ?? 默认值, 剩余预算)`，且不小于 1ms
+   *   （剩余预算只能把单项超时压小，不能放大；1ms 下界保证 `withTimeout` 仍真正生效）。
+   */
+  readonly disposeBudgetMs?: number
   readonly onError?: (error: unknown, label: string | undefined) => void
 }
 
@@ -33,6 +45,7 @@ export class EffectStack implements Disposable {
   readonly #opts: EffectStackOptions
   #seq = 0
   #state: 'open' | 'draining' | 'closed' = 'open'
+  #skippedByBudget = 0
 
   constructor(options: EffectStackOptions = {}) {
     this.#opts = options
@@ -54,6 +67,14 @@ export class EffectStack implements Disposable {
   /** 已开始或已完成回收。 */
   get settled(): boolean {
     return this.#state !== 'open'
+  }
+
+  /**
+   * 累计因整栈回收预算耗尽而被跳过的 teardown 数量（只读诊断计数）。
+   * 用途：测试断言 + 宿主状态面板；预算未启用时恒为 0。
+   */
+  get skippedByBudget(): number {
+    return this.#skippedByBudget
   }
 
   /**
@@ -125,19 +146,39 @@ export class EffectStack implements Disposable {
   async dispose(): Promise<void> {
     if (this.#state === 'closed') return
     this.#state = 'draining'
+    const budgetMs = this.#opts.disposeBudgetMs
+    const deadline = budgetMs !== undefined && budgetMs > 0 ? Date.now() + budgetMs : undefined
     while (this.#entries.length > 0) {
       const entry = this.#entries.pop()
       if (entry === undefined) break
-      await this.#run(entry)
+      if (deadline === undefined) {
+        await this.#run(entry)
+        continue
+      }
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        // 预算耗尽：**不 break** —— 剩下每一项都要留下一条"被跳过"的上报记录，
+        // 静默截断会让宿主日志无法区分"没有剩余 effect"与"剩余 effect 被丢掉"。
+        this.#skippedByBudget += 1
+        this.#opts.onError?.(
+          new Error(`effect "${entry.label ?? '<anonymous>'}" 因整栈回收预算耗尽被跳过，teardown 未执行`),
+          entry.label,
+        )
+        continue
+      }
+      await this.#run(entry, remaining)
     }
     this.#state = 'closed'
   }
 
-  async #run(entry: Entry): Promise<void> {
+  async #run(entry: Entry, remainingBudgetMs?: number): Promise<void> {
     try {
       const result = entry.teardown()
       if (result !== undefined && typeof (result as Promise<void>).then === 'function') {
-        await withTimeout(result as Promise<void>, this.#opts.disposeTimeoutMs ?? DEFAULT_DISPOSE_TIMEOUT_MS)
+        const configured = this.#opts.disposeTimeoutMs ?? DEFAULT_DISPOSE_TIMEOUT_MS
+        const timeoutMs =
+          remainingBudgetMs === undefined ? configured : Math.max(1, Math.min(configured, remainingBudgetMs))
+        await withTimeout(result as Promise<void>, timeoutMs)
       }
     } catch (error) {
       this.#opts.onError?.(error, entry.label)

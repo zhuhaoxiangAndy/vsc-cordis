@@ -29,7 +29,11 @@ export class ServiceVersionMismatchError extends VscordisError {
   readonly actual: string | undefined
 
   constructor(service: string, range: string, actual: string | undefined) {
-    super(`服务 "${service}" 的版本 ${actual ?? '<未声明>'} 不满足范围 ${range}`)
+    super(
+      `服务 "${service}" 的版本 ${actual ?? '<未声明>'} 不满足范围 ${range}。` +
+        `两个出路：把提供者插件升级/降级到 ${range} 覆盖的版本，` +
+        `或放宽依赖方 plugin.json#dependencies 里的 "${service}" 范围（ADR-0019）。`,
+    )
     this.service = service
     this.range = range
     this.actual = actual

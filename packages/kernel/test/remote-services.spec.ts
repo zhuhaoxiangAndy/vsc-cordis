@@ -19,21 +19,49 @@ function hostFor(port: FakeHostPort): PluginHost {
   return new PluginHost({ port, disposeTimeoutMs: 200, activationTimeoutMs: 2_000 })
 }
 
-test('远程服务：ctx.use 被拒绝并指向 ctx.async.useService', async () => {
-  const port = new FakeHostPort()
-  port.define('remote-provider', (): CordisPlugin => ({
+/**
+ * 模拟**隔离加载器**注册远程服务的方式。
+ *
+ * 两个关键点必须与生产一致，否则测试会得出假结论：
+ * 1. `remote: true` 由**运行时**写入（隔离 loader 在宿主侧注册远程代理）；
+ *    插件自己 `ctx.provide(..., { remote: true })` 现在会被明确拒绝（见 plugin-host.spec.ts）。
+ * 2. 注册句柄挂在提供者插件的 EffectStack 上 → 提供者卸载时撤销服务 → 级联暂停消费者。
+ */
+function defineRemoteProvider(
+  port: FakeHostPort,
+  host: PluginHost,
+  pluginId: string,
+  service: { readonly name: string; readonly instance: unknown; readonly version: string },
+): void {
+  port.define(pluginId, (): CordisPlugin => ({
     activate(ctx) {
-      // 宿主侧的远程实例：方法返回 Promise（真实的隔离加载器就是这么注册的）
-      ctx.provide('clock', { now: async () => 'tick' }, { version: '1.0.0', remote: true })
+      ctx.effect(
+        () =>
+          host.registry.provide(pluginId, service.name, service.instance, {
+            version: service.version,
+            remote: true,
+          }),
+        (handle) => handle.dispose(),
+        `remote-provide:${service.name}`,
+      )
     },
   }))
+}
+
+test('远程服务：ctx.use 被拒绝并指向 ctx.async.useService', async () => {
+  const port = new FakeHostPort()
+  const host = hostFor(port)
+  defineRemoteProvider(port, host, 'remote-provider', {
+    name: 'clock',
+    instance: { now: async () => 'tick' },
+    version: '1.0.0',
+  })
   port.define('sync-consumer', (): CordisPlugin => ({
     activate(ctx) {
       ctx.use('clock')
     },
   }))
 
-  const host = hostFor(port)
   await host.load(makeEntry('remote-provider'))
   await host.settle()
 
@@ -51,11 +79,12 @@ test('远程服务：ctx.use 被拒绝并指向 ctx.async.useService', async () 
 
 test('远程服务：ctx.async.useService 可取用，且是硬依赖（提供者走了会被暂停）', async () => {
   const port = new FakeHostPort()
-  port.define('remote-provider', (): CordisPlugin => ({
-    activate(ctx) {
-      ctx.provide('clock', { now: async () => 'tick' }, { version: '1.0.0', remote: true })
-    },
-  }))
+  const host = hostFor(port)
+  defineRemoteProvider(port, host, 'remote-provider', {
+    name: 'clock',
+    instance: { now: async () => 'tick' },
+    version: '1.0.0',
+  })
   port.define('async-consumer', (): CordisPlugin => ({
     async activate(ctx) {
       const clock = await ctx.async.useService<{ now(): Promise<string> }>('clock')
@@ -68,7 +97,6 @@ test('远程服务：ctx.async.useService 可取用，且是硬依赖（提供�
     },
   }))
 
-  const host = hostFor(port)
   const provider = makeEntry('remote-provider')
   await host.load(provider)
   await host.load(makeEntry('async-consumer', { permissions: ['vscode:commands.register'] }))
@@ -91,6 +119,7 @@ test('远程服务：ctx.async.useService 可取用，且是硬依赖（提供�
 
 test('回归：未在 plugin.json 里声明、但运行期用过的依赖，恢复判定必须仍然正确', async () => {
   const port = new FakeHostPort()
+  const host = hostFor(port)
 
   /**
    * 这是被隔离测试逼出来的真实缺陷：
@@ -98,11 +127,11 @@ test('回归：未在 plugin.json 里声明、但运行期用过的依赖，恢�
    * 一个"用了服务却没声明"的插件会被误判成"没有缺失依赖"，
    * 于是在提供者仍然缺席时被尝试恢复 → 直接变成 `failed`（本该停在 `paused`）。
    */
-  port.define('provider', (): CordisPlugin => ({
-    activate(ctx) {
-      ctx.provide('clock', { now: async () => 'tick' }, { version: '1.0.0', remote: true })
-    },
-  }))
+  defineRemoteProvider(port, host, 'provider', {
+    name: 'clock',
+    instance: { now: async () => 'tick' },
+    version: '1.0.0',
+  })
   port.define('undeclared-consumer', (): CordisPlugin => ({
     async activate(ctx) {
       // 注意：这个插件的 plugin.json 里 **没有** clock 依赖
@@ -110,7 +139,6 @@ test('回归：未在 plugin.json 里声明、但运行期用过的依赖，恢�
     },
   }))
 
-  const host = hostFor(port)
   const provider = makeEntry('provider')
   const consumer = makeEntry('undeclared-consumer') // 故意不带 dependencies
 
@@ -138,14 +166,14 @@ test('回归：未在 plugin.json 里声明、但运行期用过的依赖，恢�
 
 test('远程服务：异步代理只暴露方法表里的方法', async () => {
   const port = new FakeHostPort()
-  port.define('p', (): CordisPlugin => ({
-    activate(ctx) {
-      // 宿主侧注册的远程实例：`now` 是方法，`label` 是数据字段
-      ctx.provide('clock', { label: 'x', now: async () => 'tick' }, { version: '1.0.0', remote: true })
-    },
-  }))
-
   const host = hostFor(port)
+  defineRemoteProvider(port, host, 'p', {
+    name: 'clock',
+    // 宿主侧注册的远程实例：`now` 是方法，`label` 是数据字段
+    instance: { label: 'x', now: async () => 'tick' },
+    version: '1.0.0',
+  })
+
   await host.load(makeEntry('p'))
   await host.settle()
 
@@ -159,12 +187,13 @@ test('远程服务：异步代理只暴露方法表里的方法', async () => {
 
 test('用注册表快照能看出"服务在隔离进程里"（供状态面板与 CLI 显示）', async () => {
   const port = new FakeHostPort()
-  port.define('p', (): CordisPlugin => ({
-    activate(ctx) {
-      ctx.provide('remote-thing', { go: async () => 1 }, { version: '2.0.0', remote: true })
-    },
-  }))
   const host = hostFor(port)
+  defineRemoteProvider(port, host, 'p', {
+    name: 'remote-thing',
+    instance: { go: async () => 1 },
+    version: '2.0.0',
+  })
+
   await host.load(makeEntry('p'))
   await host.settle()
 

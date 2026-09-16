@@ -93,6 +93,7 @@ export class Runtime {
       workerPath: this.#workerPath,
       publicKeyPem: this.#publicKeyPem,
       disposeTimeoutMs: readDisposeTimeoutMs(),
+      disposeBudgetMs: readDisposeBudgetMs(),
       usePermissionModel: vscode.workspace
         .getConfiguration('vscordis')
         .get<boolean>('isolation.permissionModel', true),
@@ -117,7 +118,14 @@ export class Runtime {
       port: this.bridge,
       registry,
       disposeTimeoutMs: readDisposeTimeoutMs(),
+      // 同进程与隔离两种模式必须用**同一个**预算值，否则"卸载最坏耗时"会随 trust 漂移。
+      disposeBudgetMs: readDisposeBudgetMs(),
       activationTimeoutMs: readActivationTimeoutMs(),
+      // engines 是**强制**检查（ADR-0017），而强制只在这两个版本被真的传进来时才可能发生。
+      // 这里曾经漏传：extension.ts 明明把 hostVersion 交给了 Runtime，却没有继续往下传，
+      // 于是生产路径上 `plugin.json#engines` 等于没写 —— 又一个"声明了却不生效"。
+      hostVersion: options.hostVersion,
+      vscodeVersion: vscode.version,
       onTransition: (event) => {
         this.bridge.log('debug', `[状态] ${event.id}: ${event.from} → ${event.to}（${event.reason}）`)
       },
@@ -506,6 +514,17 @@ function statusIcon(view: PluginView): string {
 function readDisposeTimeoutMs(): number {
   const configured = vscode.workspace.getConfiguration('vscordis').get<number>('disposeTimeoutMs', 2000)
   return Number.isFinite(configured) && configured > 0 ? configured : 2000
+}
+
+/**
+ * 单个插件整栈回收的总预算（ADR-0015 已知缺口 1）。
+ *
+ * 默认 30s：单项超时默认 2s，所以"十几个插件同时挂死"也不会把串行队列拖到几分钟。
+ * `0` / 负数 = 显式关闭预算（回到"总时长 = N × 单项超时"的旧行为）。
+ */
+function readDisposeBudgetMs(): number {
+  const configured = vscode.workspace.getConfiguration('vscordis').get<number>('disposeBudgetMs', 30_000)
+  return Number.isFinite(configured) && configured >= 0 ? configured : 30_000
 }
 
 /**
