@@ -350,7 +350,7 @@ test('doctor --json：checks 带稳定 name，退出码与文本模式一致', a
   }
   assert.deepEqual(
     payload.checks.map((check) => check.name),
-    ['node-version', 'host-version', 'plugin-root', 'isolation-worker', 'signing-key'],
+    ['node-version', 'host-version', 'plugin-root', 'isolation-worker', 'extension-bundle', 'signing-key'],
   )
   assert.equal(payload.errors, 0)
   assert.ok(payload.checks.every((check) => check.level === 'ok' || check.level === 'warn'))

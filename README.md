@@ -35,7 +35,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 215 项测试（214 通过 + 1 个严格用例按设计 skip）+ 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 全部测试 + 文档链接检查 + 构建 + 产物冒烟（准确数字以输出为准）
 ```
 
 开发时开两个进程：
@@ -98,8 +98,9 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 - 子进程的寿命 = 宿主侧的一项 effect，卸载时 `kill` 是兜底。
 
 隔离层刻意**不 import `vscode`**（宿主能力由接口注入），因此整条链路可以用 `node --test`
-端到端验证：**16 项测试**跑的是**真实子进程 + 真实 IPC + 真实 `--permission`**。
-示例插件 `plugins/isolated-hello`，手动验收见 `docs/acceptance-m4b.md`。
+端到端验证：`isolation.spec.ts` / `isolation-soak.spec.ts` 跑的是**真实子进程 + 真实 IPC +
+真实 `--permission`**（含 40 轮起停浸泡）。示例插件 `plugins/isolated-hello`，手动验收见
+`docs/acceptance-quick.md` 与 `docs/acceptance-m4b.md`。
 
 隔离模式**支持**：
 

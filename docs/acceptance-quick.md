@@ -9,7 +9,7 @@
 > （`packages/host/test/bridge.spec.ts`、`runtime.spec.ts`）；但**真实 Electron 行为**
 > —— 桥接在真实宿主里的表现、`--permission` 是否可用、真实文件监听的时延 —— 无法在
 > `node --test` 里覆盖，项目按用户决策**不跑** `@vscode/test-electron` e2e。
-> 自动化能覆盖的部分是 249+ 项测试（含 1 个 `--expose-gc` 严格用例按设计 skip）。
+> 自动化能覆盖的部分是 250+ 项测试（`pnpm run verify`；含 1 个 `--expose-gc` 严格用例按设计 skip）。
 
 ## 0. 准备（1 分钟）
 
@@ -117,5 +117,5 @@ pnpm run watch   # 终端里跑着
 3. `VSCode: 帮助 → 关于`（版本 + Electron 版本）、`node --version`；
 4. 第 3 步额外注明：`vscordis.isolation.permissionModel` 是 `true` 还是 `false`，报错原文。
 
-自动化能覆盖的 215 项测试**不包含**上面任何一条的真实 Electron 行为 ——
+上面这些自动化测试**不包含**任何真实 Electron 行为 ——
 所以这份单子不是形式，它是唯一能证明"桥接层在你的机器上真的工作"的证据。

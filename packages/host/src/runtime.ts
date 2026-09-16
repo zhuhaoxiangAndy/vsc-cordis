@@ -406,6 +406,12 @@ export class Runtime {
           ? '（有生命周期任务在排队/执行；长时间不归零说明某个任务卡住，见 ADR-0015）'
           : '（空闲）'),
     )
+    // 展示**生效值**（不是默认值）：排查"为什么卸载要等这么久"时先看这里
+    lines.push(
+      `回收配置：单项超时 ${readDisposeTimeoutMs()}ms · 整栈预算 ${readDisposeBudgetMs()}ms` +
+        (readDisposeBudgetMs() === 0 ? '（已关闭）' : '') +
+        '（ADR-0015）',
+    )
     const hotReload = vscode.workspace.getConfiguration('vscordis').get<boolean>('hotReload', true)
     const lastReload =
       this.#lastReloadAt === undefined

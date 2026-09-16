@@ -93,6 +93,7 @@ test('runtime：initialize 在空插件根下完成；状态面板给出关键�
     assert.match(lines, /隔离子进程：不可用/)
     assert.match(lines, /完整性校验：已配置验签公钥/, 'extensionUri 指向 packages/host，公钥在库里')
     assert.match(lines, /任务队列：深度 0（空闲）/)
+    assert.match(lines, /回收配置：单项超时 \d+ms · 整栈预算 \d+ms/)
     assert.match(lines, /热重载：关闭/)
     assert.match(lines, /插件（0）：/)
     assert.match(lines, /服务（0）：/)

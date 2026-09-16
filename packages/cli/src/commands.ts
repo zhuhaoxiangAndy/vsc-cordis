@@ -255,6 +255,12 @@ export async function runDoctor(
           text: '隔离后端产物不存在：untrusted 插件会被 fail-closed 拒绝 —— 先跑 pnpm run build',
         },
   )
+  const bundlePath = path.join(cliRepoRoot(), 'packages', 'host', 'dist', 'extension.cjs')
+  lines.push(
+    existsSync(bundlePath)
+      ? { name: 'extension-bundle', level: 'ok', text: '宿主扩展产物已构建（dist/extension.cjs）' }
+      : { name: 'extension-bundle', level: 'warn', text: '宿主扩展产物不存在：先跑 pnpm run build（F5 调试依赖它）' },
+  )
   const publicKeyPath = path.join(cliRepoRoot(), 'packages', 'host', 'keys', 'vscordis-ed25519.pub.pem')
   lines.push(
     existsSync(publicKeyPath)

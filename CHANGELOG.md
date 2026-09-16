@@ -28,7 +28,11 @@
   （`{ checks: [{name,level,text}], warnings, errors }`，`name` 是稳定契约）——CI 与编辑器工具可消费。
 - **`vscordis doctor`**：静态环境自检（Node 版本 vs 仓库下界、宿主包版本、插件根与清单问题数、
   隔离后端产物是否已构建、验签公钥是否就位）；error 级问题退出码 1，warn 不失败。
-  它**不**代替手动验收 —— 输出里直接写明这一点。
+  它**不**代替手动验收 —— 输出里直接写明这一点。另含扩展产物（`dist/extension.cjs`）检查。
+- 状态面板显示**生效的**回收配置（单项超时 / 整栈预算）与"累计起过多少隔离子进程"；
+  文档里会随轮次漂移的硬编码测试数改为"以 `pnpm run verify` 输出为准"。
+- `scripts/push-with-retry.ps1` 改为只推**当前分支**（此前硬编码 `main` + 一个已合并的
+  feature 分支，后者会让重试白等）。
 - **文档链接检查成为门禁**：`scripts/check-doc-links.mjs` 校验 Markdown 链接与行内代码里的仓库路径
   （含 ADR 编号短引用，如 `docs/adr/0002`），接入 `pnpm run verify` 与 CI；
   检查器自身的"坏链接会失败"有反向验证测试。
