@@ -239,7 +239,12 @@ export class PluginHost {
   async unload(id: PluginId): Promise<void> {
     await this.#enqueue(async () => {
       const record = this.#records.get(id)
-      if (record === undefined) return
+      if (record === undefined) {
+        // 对"不存在的 id / 已卸载的 id"保持幂等（重复 unload 是允许的），但必须**留痕**：
+        // 否则一个拼错的 id 会表现为"卸载成功了，插件怎么还在？"（本轮测试就踩过这个坑）。
+        this.#port.log('debug', `unload：插件 "${id}" 当前不在记录里（幂等无操作）`, { plugin: id })
+        return
+      }
       await this.#deactivateTo(record, 'idle', 'unload')
       this.#records.delete(id)
     })

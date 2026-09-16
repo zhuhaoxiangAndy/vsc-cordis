@@ -251,3 +251,152 @@ test(`隔离浸泡：${CYCLES} 轮起停子进程后，没有残留的活跃会�
     await host.dispose().catch(() => undefined)
   }
 })
+
+/**
+ * 多会话浸泡：同时跑 **3 个**隔离子进程（提供者 + 消费者 + 独立插件），循环若干轮。
+ *
+ * 与单会话浸泡互补的地方：
+ * - 每轮的会话记账必须走 0 → 3 → 0（`sessionsStarted` 也每轮 +3）；
+ * - 每个周期都做一次**跨两个子进程**的服务调用（消费者 → 宿主 → 提供者）；
+ * - 每个周期都验证级联：卸载提供者 → 消费者 `paused`、独立插件不受影响。
+ */
+const MULTI_CYCLES = 8
+
+async function writeSoakFixture(
+  id: string,
+  source: string,
+  manifest: { provides?: readonly string[]; dependencies?: Record<string, string>; permissions?: readonly string[] },
+): Promise<PluginEntry> {
+  const dir = path.join(fixturesRoot, `multi-${id}`)
+  await mkdir(path.join(dir, 'dist'), { recursive: true })
+  await writeFile(path.join(dir, 'dist', 'index.cjs'), source, 'utf8')
+  await writeFile(
+    path.join(dir, 'plugin.json'),
+    `${JSON.stringify(
+      {
+        id,
+        name: id,
+        version: '1.0.0',
+        main: 'dist/index.cjs',
+        trust: 'untrusted',
+        permissions: manifest.permissions ?? [],
+        provides: manifest.provides ?? [],
+        dependencies: manifest.dependencies ?? {},
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  )
+  return {
+    root: dir,
+    mainPath: path.join(dir, 'dist', 'index.cjs'),
+    source: 'workspace',
+    manifest: {
+      id,
+      name: id,
+      version: '1.0.0',
+      main: 'dist/index.cjs',
+      description: undefined,
+      dependencies: manifest.dependencies ?? {},
+      provides: [...(manifest.provides ?? [])],
+      permissions: [...(manifest.permissions ?? [])],
+      trust: 'untrusted',
+    },
+  }
+}
+
+test(`隔离浸泡（多会话）：${MULTI_CYCLES} 轮 × 3 个子进程，含跨进程调用与级联`, async () => {
+  const workerPath = await ensureWorker()
+  const provider = await writeSoakFixture(
+    'provider',
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('soak-clock', { now: () => 'tick' }, { version: '1.0.0' })
+       },
+     }\n`,
+    { provides: ['soak-clock'] },
+  )
+  const consumer = await writeSoakFixture(
+    'consumer',
+    `module.exports = {
+       activate: async (ctx) => {
+         const clock = await ctx.async.useService('soak-clock')
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('soak.consumer.now', async () => await clock.now()),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { dependencies: { 'soak-clock': '^1.0.0' }, permissions: ['vscode:commands.register'] },
+  )
+  const solo = await writeSoakFixture(
+    'solo',
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('soak.solo.ping', () => 'pong'),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+
+  const hostApi = new SilentHostApi()
+  const registry = new ServiceRegistry()
+  const loader = new IsolatedPluginLoader({
+    hostApi,
+    registry,
+    workerPath,
+    publicKeyPem: undefined,
+    readyTimeoutMs: 15_000,
+    disposeTimeoutMs: 3_000,
+  })
+  const host = new PluginHost({
+    port: new IsolationPort(loader),
+    registry,
+    disposeTimeoutMs: 4_000,
+    activationTimeoutMs: 20_000,
+  })
+
+  try {
+    for (let cycle = 0; cycle < MULTI_CYCLES; cycle += 1) {
+      await host.load(provider)
+      await host.load(consumer)
+      await host.load(solo)
+      await host.settle()
+
+      assert.equal(loader.activeSessions, 3, `第 ${cycle} 轮应有 3 个活跃会话`)
+      assert.equal(loader.sessionsStarted, (cycle + 1) * 3, `第 ${cycle} 轮应累计起过 ${(cycle + 1) * 3} 个子进程`)
+      assert.equal(hostApi.commands.size, 2, '消费者与 solo 各注册一条命令')
+
+      // 跨两个子进程的服务调用：消费者 child → 宿主 → 提供者 child
+      assert.equal(await hostApi.executeCommand('consumer', 'soak.consumer.now', []), 'tick')
+      assert.equal(await hostApi.executeCommand('solo', 'soak.solo.ping', []), 'pong')
+
+      // 卸载提供者：消费者被级联暂停，独立插件不受影响
+      await host.unload('provider')
+      await host.settle()
+      assert.equal(host.view('consumer')?.state, 'paused', `第 ${cycle} 轮消费者应被级联暂停`)
+      assert.equal(host.view('solo')?.state, 'active', `第 ${cycle} 轮独立插件不应受影响`)
+
+      await host.unloadAll()
+      await host.settle()
+      assert.equal(host.queueDepth, 0, `第 ${cycle} 轮队列应排空`)
+
+      for (let attempt = 0; attempt < 80 && loader.activeSessions > 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      assert.equal(loader.activeSessions, 0, `第 ${cycle} 轮结束后不得残留子进程`)
+      assert.equal(hostApi.commands.size, 0)
+    }
+
+    assert.equal(loader.sessionsStarted, MULTI_CYCLES * 3, '每个周期都应当恰好起过 3 个子进程')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.dispose().catch(() => undefined)
+  }
+})

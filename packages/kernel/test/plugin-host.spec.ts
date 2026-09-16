@@ -432,6 +432,22 @@ test('disposeBudgetMs：预算耗尽后跳过剩余 teardown，并逐项记日�
   assert.match(details, /fast/, '被跳过的项必须留下可检索的记录（不能静默 break）')
 })
 
+test('unload：不存在的 id 保持幂等，但会留下 debug 日志（拼错 id 不再静默）', async () => {
+  const port = new FakeHostPort()
+  port.define('real', (): CordisPlugin => ({ activate() {} }))
+  const host = hostFor(port)
+
+  await host.unload('typo-id')
+  await host.settle()
+
+  assert.deepEqual(host.list(), [])
+  assert.ok(
+    port.logsFor('typo-id').some((message) => message.includes('幂等无操作')),
+    `应当留下 debug 日志，实际：${port.logsFor('typo-id').join(' | ') || '<无>'}`,
+  )
+  await host.dispose()
+})
+
 test('PluginView.effectCount：active 时是当前副作用项数，paused / 卸载后归零', async () => {
   const port = new FakeHostPort()
   port.define('counted', (): CordisPlugin => ({
