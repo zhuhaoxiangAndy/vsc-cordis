@@ -42,7 +42,7 @@ export class VscodeHostApi implements IsolatedHostApi {
   readonly #options: VscodeHostApiOptions
   readonly #outputs = new Map<number, vscode.OutputChannel>()
   readonly #statusBarItems = new Map<number, { item: vscode.StatusBarItem; pluginId: string }>()
-  readonly #commands = new Map<string, string>()
+  readonly #commands = new Map<string, { pluginId: string; disposable: vscode.Disposable }>()
   /** 文档句柄 → 真实文档 + 归属插件。句柄有生命周期，见 #rememberDocument。 */
   readonly #documentHandles = new Map<number, { pluginId: string; document: vscode.TextDocument }>()
   readonly #documentHandleOrder: number[] = []
@@ -56,7 +56,7 @@ export class VscodeHostApi implements IsolatedHostApi {
   /** 当前由隔离子进程注册的活命令（供状态面板显示）。 */
   liveCommands(): readonly { command: string; pluginId: string }[] {
     return [...this.#commands.entries()]
-      .map(([command, pluginId]) => ({ command, pluginId }))
+      .map(([command, record]) => ({ command, pluginId: record.pluginId }))
       .sort((a, b) => a.command.localeCompare(b.command))
   }
 
@@ -66,18 +66,21 @@ export class VscodeHostApi implements IsolatedHostApi {
     invoke: (args: readonly unknown[]) => Promise<unknown>,
   ): Disposable {
     const disposable = vscode.commands.registerCommand(command, (...args: unknown[]) => invoke(args))
-    this.#commands.set(command, pluginId)
+    this.#commands.set(command, { pluginId, disposable })
     return {
       dispose: () => {
-        if (this.#commands.get(command) === pluginId) this.#commands.delete(command)
+        const current = this.#commands.get(command)
+        if (current?.pluginId === pluginId) this.#commands.delete(command)
         disposable.dispose()
       },
     }
   }
 
   unregisterCommand(command: string): void {
-    // 句柄的 dispose 由 IsolatedSession 负责；这里只清归属记账。
+    // 句柄的 dispose 由 IsolatedSession 负责；这里清归属记账，并在兜底路径里真的注销。
+    const current = this.#commands.get(command)
     this.#commands.delete(command)
+    current?.disposable.dispose()
   }
 
   async executeCommand(pluginId: string, command: string, args: readonly unknown[]): Promise<unknown> {
@@ -291,6 +294,12 @@ export class VscodeHostApi implements IsolatedHostApi {
   dispose(): void {
     for (const handle of [...this.#outputs.keys()]) this.disposeOutput(handle)
     for (const handle of [...this.#statusBarItems.keys()]) this.disposeStatusBarItem(handle)
-    this.#commands.clear()
+    for (const [command, record] of [...this.#commands]) {
+      this.#commands.delete(command)
+      record.disposable.dispose()
+    }
+    // 文档句柄会钉住整篇文档；宿主关闭时不能留在表里。
+    this.#documentHandles.clear()
+    this.#documentHandleOrder.length = 0
   }
 }

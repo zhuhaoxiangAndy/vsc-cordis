@@ -38,6 +38,8 @@ export class Runtime {
   readonly #supportsIsolation: boolean
   /** 保留引用是为了状态面板能报告"当前有几个隔离子进程"——诊断信息不该只活在测试里。 */
   readonly #isolatedLoader: IsolatedPluginLoader
+  /** 宿主侧隔离 API 的兜底释放入口：宿主关闭时注销命令、回收文档句柄。 */
+  readonly #vscodeHostApi: VscodeHostApi
   /** 热重载计划串行队列：快速保存产生多个 plan 时不能并发 refresh/load/reload（审计 F2）。 */
   #reloadQueue: Promise<void> = Promise.resolve()
   /** 规范化目录 → 插件 id。热重载要靠目录反查 id；目录被删除时也靠它决定卸载谁。 */
@@ -76,22 +78,26 @@ export class Runtime {
       },
     })
 
+    const vscodeHostApi = new VscodeHostApi({
+      isPluginCommand: (command) => this.bridge.livePluginCommands().some((info) => info.command === command),
+      // 权限只能由宿主查清单得出：让子进程自述等于允许它给自己提权。
+      permissionsOf: (id) => {
+        const entry = this.#entries.find((candidate) => candidate.manifest.id === id)
+        const granted = new Set<Permission>()
+        // 用守卫过滤而不是硬转：清单里的权限是 string[]，而内核只放行已知权限
+        // （未知权限会在 manifest 校验期直接拒绝加载，所以这里过滤掉的只会是"理论上不该存在"的值）。
+        for (const value of entry?.manifest.permissions ?? []) {
+          if (isPermission(value)) granted.add(value)
+        }
+        return granted
+      },
+      log: (level, message, meta) => this.bridge.log(level, message, meta),
+    })
+    this.#vscodeHostApi = vscodeHostApi
+
     const isolatedLoader = new IsolatedPluginLoader({
       registry,
-      hostApi: new VscodeHostApi({        isPluginCommand: (command) => this.bridge.livePluginCommands().some((info) => info.command === command),
-        // 权限只能由宿主查清单得出：让子进程自述等于允许它给自己提权。
-        permissionsOf: (id) => {
-          const entry = this.#entries.find((candidate) => candidate.manifest.id === id)
-          const granted = new Set<Permission>()
-          // 用守卫过滤而不是硬转：清单里的权限是 string[]，而内核只放行已知权限
-          // （未知权限会在 manifest 校验期直接拒绝加载，所以这里过滤掉的只会是"理论上不该存在"的值）。
-          for (const value of entry?.manifest.permissions ?? []) {
-            if (isPermission(value)) granted.add(value)
-          }
-          return granted
-        },
-        log: (level, message, meta) => this.bridge.log(level, message, meta),
-      }),
+      hostApi: vscodeHostApi,
       workerPath: this.#workerPath,
       publicKeyPem: this.#publicKeyPem,
       disposeTimeoutMs: readDisposeTimeoutMs(),
@@ -525,6 +531,8 @@ export class Runtime {
     // 先停监听（不再产生新 plan），再等已排队的 plan 跑完，最后才拆宿主。
     await this.#reloadQueue.catch(() => undefined)
     await this.host.dispose()
+    // 兜底释放：正常路径下插件卸载已经清过各自资源，这里覆盖"某个会话没走完整清理"的情况。
+    this.#vscodeHostApi.dispose()
   }
 }
 
