@@ -40,6 +40,10 @@
 
 ### 修复
 
+- **隔离边界可被插件根内的 junction/symlink 绕过**：Node `--permission --allow-fs-read=<pluginRoot>`
+  只限制路径字符串、不解析链接；实测 root 内 junction 可读到 root 外文件。现在 fork 前递归扫描
+  插件目录，任何链接的 `realpath` 落在 root 外都 fail-closed（`PluginReparsePointError` →
+  `PluginIntegrityCheckError`），一个子进程都不会起。见 ADR-0020。
 - **桥接层 `track()` 从不调用底层 `dispose`**：`release` 里的 `raw.dispose()` 已经被
   `defineProperty` 覆盖成 `release` 本身（递归守卫直接 return），真正的注销永远不执行 ——
   表现为"命令从 QuickPick 消失、但 VSCode 的命令注册表里还留着"。修法：先抓住原始 dispose 再覆盖。
@@ -60,6 +64,8 @@
 
 ### 测试
 
+- 新增 ADR-0020 回归：外部 junction 必须在 fork 前拒绝（`sessionsStarted === 0` 哨兵），
+  root 内 junction 不误伤。
 - **稳定性（flake hunt）**：完整套件连续 3 次全绿 —— 258 项（257 通过 + 1 个 `--expose-gc` 严格用例
   按设计 skip），每次约 4.6s；未发现时序脆弱用例。**发布门槛**：`pnpm run verify:release` 通过
   （生产构建 + vsce 打包 + 对真实 VSIX 的 9 项断言，解压后 139.6 KB，无源码/测试/node_modules/sourcemap）。

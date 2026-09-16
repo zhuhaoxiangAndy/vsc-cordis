@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, symlink, writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
 import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -535,6 +535,69 @@ test('隔离边界：Node 权限模型真的拦住了越界读（不是"靠约�
     assert.match(String(error), /ERR_ACCESS_DENIED|Access to this API has been restricted/)
     return true
   })
+})
+
+test('隔离边界：插件目录内指向目录外的 junction/symlink 在 fork 前被拒绝（ADR-0020）', async () => {
+  const hostApi = new FakeHostApi()
+  const outsideDir = path.join(scratch, 'junction-escape-outside')
+  await mkdir(outsideDir, { recursive: true })
+  await writeFile(path.join(outsideDir, 'secret.txt'), 'OUTSIDE_SECRET\n', 'utf8')
+
+  const entry = await makeFixture('junction-escape', `module.exports = { activate() {} }\n`)
+  const link = path.join(entry.root, 'leak')
+  try {
+    await symlink(outsideDir, link, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+
+  const { host, loader } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), (error: unknown) => {
+    assert.match(String(error), /指向目录外的链接/)
+    return true
+  })
+  assert.equal(
+    loader.sessionsStarted,
+    0,
+    '必须在 fork 前拒绝：一个隔离会话都不能创建，否则恶意插件已经在子进程里跑过了',
+  )
+})
+
+test('隔离边界：指向插件目录内部的链接不误伤（ADR-0020）', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'junction-inside',
+    `module.exports = {
+       activate(ctx) {
+         const fs = require('node:fs')
+         const path = require('node:path')
+         ctx.log.info(fs.readFileSync(path.join(__dirname, '..', 'alias', 'inside.txt'), 'utf8').trim())
+       },
+     }\n`,
+  )
+  const realDir = path.join(entry.root, 'real')
+  await mkdir(realDir, { recursive: true })
+  await writeFile(path.join(realDir, 'inside.txt'), 'INSIDE_OK\n', 'utf8')
+  const link = path.join(entry.root, 'alias')
+  try {
+    await symlink(realDir, link, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(host.view('junction-inside')?.state, 'active')
+    assert.ok(
+      hostApi.logs.some((log) => log.message.includes('INSIDE_OK')),
+      'root 内链接指向的文件应当可读，扫描不能因“看见链接”就拒绝整个插件',
+    )
+  } finally {
+    await host.unload('junction-inside')
+    await host.settle()
+  }
 })
 
 test('隔离边界：未授权能力在宿主侧被拒绝（宿主的判定是权威的）', async () => {

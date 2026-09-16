@@ -3,6 +3,7 @@ import type { CordisPlugin, Disposable, LogLevel, Permission, PluginContext } fr
 import { PermissionDeniedError, ServiceRegistry, ServiceUnavailableError, describe, type LoadedPluginModule, type PluginEntry } from '@vscordis/kernel'
 import type { EffectScopeApi } from '@vscordis/sdk'
 import { PluginIntegrityError, verifyPluginArtifact } from '../integrity.ts'
+import { assertNoEscapingReparsePoints } from '../paths.ts'
 import { buildExecArgv, toIsolatedPermissions, type ExecArgvPlan } from './permissions.ts'
 import {
   PROTOCOL_VERSION,
@@ -384,6 +385,20 @@ export class IsolatedPluginLoader {
           : { usePermissionModel: this.#options.usePermissionModel }),
       })
     for (const warning of plan.warnings) this.#log(`[${pluginId}] ${warning}`)
+
+    // Node 权限模型不解析 reparse point：先把“指向 root 外”的 symlink/junction 拒掉，
+    // 而且必须发生在 fork 之前（ADR-0020）。permissionModel=false 时 execArgv 为空，
+    // 用户已经显式接受“没有强制 fs 边界”，不做这项扫描。
+    if (plan.execArgv.includes('--permission')) {
+      try {
+        await assertNoEscapingReparsePoints(entry.root)
+      } catch (error) {
+        throw new PluginIntegrityCheckError(
+          pluginId,
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+    }
 
     const ref: { session: IsolatedSession | undefined } = { session: undefined }
 
