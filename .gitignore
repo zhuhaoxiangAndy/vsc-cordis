@@ -12,6 +12,8 @@ packages/host/test/scratch/
 # 私钥绝不入库（见 docs/adr/0008-secret-management.md）
 *.key
 *.pem
+# 但验签公钥**必须**能入库，否则宿主无法验证任何签名（这个反向例外不能省）
+!packages/host/keys/*.pub.pem
 .keys/
 .env
 .env.*
