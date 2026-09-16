@@ -37,6 +37,14 @@ const INLINE_REF_PATTERN = /^(?:docs|scripts|packages|plugins|\.github|\.vscode)
 /** `docs/adr/0002` 这类编号短引用。 */
 const ADR_SHORT_PATTERN = /^docs\/adr\/(\d{4})$/
 
+/**
+ * 下界哨兵：检查器的“零命中”必须失败。
+ * 没有它们时，collect 逻辑写错/目录改名会让检查器打印“0 个文件 0 条链接”后退出 0 ——
+ * 那比没有检查器更糟：给了虚假的安全感。
+ */
+const MIN_FILES = Number.parseInt(process.env.DOC_LINKS_MIN_FILES ?? '20', 10)
+const MIN_LINKS = Number.parseInt(process.env.DOC_LINKS_MIN_LINKS ?? '80', 10)
+
 /** 剥掉围栏代码块：里面的内容是示例，不参与检查。 */
 function stripFenced(text) {
   return text.replace(/```[\s\S]*?```/g, '')
@@ -70,6 +78,18 @@ async function main() {
   }
   const docsDir = path.join(targetRoot, 'docs')
   if (await exists(docsDir)) files.push(...(await collectMarkdown(docsDir)))
+
+  // 包内 README/CHANGELOG 也是文档的一部分；此前它们不受门禁保护（审计发现）。
+  const packagesDir = path.join(targetRoot, 'packages')
+  if (await exists(packagesDir)) {
+    for (const entry of await readdir(packagesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      for (const candidate of ['README.md', 'CHANGELOG.md']) {
+        const full = path.join(packagesDir, entry.name, candidate)
+        if (await exists(full)) files.push(full)
+      }
+    }
+  }
 
   const problems = []
   let checked = 0
@@ -115,6 +135,13 @@ async function main() {
       if (!INLINE_REF_PATTERN.test(token)) continue
       await checkRef(file, token, path.resolve(targetRoot, token))
     }
+  }
+
+  if (files.length < MIN_FILES) {
+    problems.push(`文档门禁可疑：只收集到 ${files.length} 个 Markdown 文件（下界 ${MIN_FILES}）`)
+  }
+  if (checked < MIN_LINKS) {
+    problems.push(`文档门禁可疑：只检查了 ${checked} 条相对引用（下界 ${MIN_LINKS}）`)
   }
 
   if (problems.length > 0) {

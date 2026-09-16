@@ -8,6 +8,7 @@
   "engines": {
     "node": ">=22.18"
   },
+  "packageManager": "pnpm@11.7.0",
   "scripts": {
     "test": "node --test \"packages/*/test/*.spec.ts\"",
     "typecheck": "tsc -p tsconfig.check.json",

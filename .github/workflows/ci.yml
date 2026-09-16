@@ -9,51 +9,44 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.18 是 package.json#engines 声明的下界；24 是当前开发版本
+        node-version: [22.18, 24]
     steps:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: 11.7.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
 
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 类型检查
-        run: pnpm run typecheck
+      # 与本地完全同一条门禁，避免 CI 硬编码步骤与 package.json 漂移。
+      - name: 验证（typecheck + tests + docs + build + smoke）
+        run: pnpm run verify
 
-      - name: 单元测试（kernel + 加载器）
-        run: pnpm test
-
-      # 文档是这个仓库交付物的一部分：相对链接与行内代码里的仓库路径必须存在。
-      # 检查器自身的"坏链接会失败"由 packages/cli/test/doc-links.spec.ts 反向验证。
-      - name: 文档链接检查
-        run: pnpm run check:docs
-
-      - name: 构建（插件 + Node 宿主 + Web 宿主）
-        run: pnpm run build
-
-      - name: 产物契约冒烟
-        run: pnpm run smoke
-
-      # 打包 + 校验真实 VSIX（读 ZIP 中央目录断言必需项在、源码/依赖不在）。
-      # 这一步同时验证了 .vscodeignore 与扩展清单在 vsce 眼里是合法的。
+      # 打包 + 校验真实 VSIX（强化后的检查器会解出包内 package.json、断言入口非空、
+      # 并扫描内联 sourcemap）。
       - name: 打包并校验 VSIX
         run: pnpm run verify:release
 
       # 说明（用户决策）：不跑 @vscode/test-electron e2e。
       # 桥接层与运行时装配的**逻辑**已由 packages/host/test/{bridge,runtime}.spec.ts 用 vscode stub
-      # 做契约测试（权限门、命令表记账、副作用回收、只读配置视图、事件订阅、initialize/状态面板/入口命令）；
-      # 真实 Electron 行为（例如 --permission 是否可用）仍只能靠 docs/acceptance-quick.md 手动验收。
+      # 做契约测试；真实 Electron 行为（例如 --permission 是否可用）仍只能靠
+      # docs/acceptance-quick.md 手动验收。
       - name: 提示未覆盖范围
         run: echo "真实 Electron 行为需要手动验收；桥接层与运行时装配逻辑已由 bridge/runtime.spec.ts 覆盖"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: vscordis-vsix
+          name: vscordis-vsix-node${{ matrix.node-version }}
           path: vscordis-local.vsix
+          if-no-files-found: error

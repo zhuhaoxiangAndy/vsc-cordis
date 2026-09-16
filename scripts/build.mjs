@@ -11,6 +11,7 @@ import { build } from 'esbuild'
 import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { EXPECTED_PLUGINS } from './expected-plugins.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const tsconfig = path.join(root, 'tsconfig.base.json')
@@ -39,6 +40,7 @@ const shared = {
 
 async function buildPlugins() {
   const pluginsDir = path.join(root, 'plugins')
+  const built = []
   for (const name of readdirSync(pluginsDir).sort()) {
     const dir = path.join(pluginsDir, name)
     const entry = path.join(dir, 'src', 'index.ts')
@@ -54,7 +56,20 @@ async function buildPlugins() {
       target: 'node20',
       plugins: [forbidVscode],
     })
+    built.push(name)
     console.log(`[plugin] ${path.relative(root, outfile)}`)
+  }
+
+  // 哨兵：`continue` 让“缺 src/index.ts”静默跳过，必须靠清单把目标数钉死。
+  for (const expected of EXPECTED_PLUGINS) {
+    if (!built.includes(expected)) {
+      throw new Error(`插件构建目标缺失：${expected}（检查 plugins/${expected}/src/index.ts）`)
+    }
+  }
+  for (const actual of built) {
+    if (!EXPECTED_PLUGINS.includes(actual)) {
+      throw new Error(`插件构建目标未登记：${actual}（请同步 scripts/expected-plugins.mjs）`)
+    }
   }
 }
 

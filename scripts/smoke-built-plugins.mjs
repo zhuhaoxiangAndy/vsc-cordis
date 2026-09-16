@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { EXPECTED_PLUGINS } from './expected-plugins.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const nodeRequire = createRequire(import.meta.url)
@@ -27,8 +28,10 @@ const { validateManifest } = await import('../packages/kernel/src/index.ts')
 const FORBIDDEN = /require\(\s*["']vscode["']\s*\)/
 
 const pluginsDir = path.join(root, 'plugins')
+/** 冒烟是门槛：空目录/少一个插件产物都必须失败，不能打印“0 个插件”后退出 0。 */
 const names = readdirSync(pluginsDir).sort()
 const failures = []
+const checkedNames = []
 let checked = 0
 
 console.log('构建产物冒烟测试')
@@ -66,10 +69,20 @@ for (const name of names) {
 
   assert.equal(typeof plugin.activate, 'function', `${name}: activate 必须是函数`)
   checked += 1
+  checkedNames.push(name)
   console.log(
     `  ✓ ${name} [${plugin.name ?? '<未命名>'}] trust=${validated.manifest.trust} ` +
       `deps=${JSON.stringify(validated.manifest.dependencies)} permissions=${validated.manifest.permissions.length}`,
   )
+}
+
+for (const expected of EXPECTED_PLUGINS) {
+  if (!checkedNames.includes(expected)) failures.push(`缺少预期插件产物：${expected}`)
+}
+for (const unexpected of checkedNames) {
+  if (!EXPECTED_PLUGINS.includes(unexpected)) {
+    failures.push(`冒烟发现未登记插件 ${unexpected}：请同步 EXPECTED_PLUGINS 后重跑`)
+  }
 }
 
 if (failures.length > 0) {

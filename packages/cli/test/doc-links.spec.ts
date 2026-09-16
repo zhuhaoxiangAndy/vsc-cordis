@@ -22,10 +22,15 @@ const repoRoot = path.resolve(here, '..', '..', '..')
 const script = path.join(repoRoot, 'scripts', 'check-doc-links.mjs')
 const scratch = path.join(here, 'scratch')
 const runId = `${process.pid}-${Date.now()}`
+/** 小夹具只有 1-2 个文件；关掉下界哨兵，专门测链接解析本身。真实仓库用例仍用默认下界。 */
+const NO_FLOOR = { DOC_LINKS_MIN_FILES: '0', DOC_LINKS_MIN_LINKS: '0' }
 
-function runChecker(root: string): { code: number; output: string } {
+function runChecker(root: string, env: Record<string, string> = {}): { code: number; output: string } {
   try {
-    const output = execFileSync(process.execPath, [script, root], { encoding: 'utf8' })
+    const output = execFileSync(process.execPath, [script, root], {
+      encoding: 'utf8',
+      env: { ...process.env, ...env },
+    })
     return { code: 0, output }
   } catch (error) {
     const failure = error as { status?: number; stdout?: string; stderr?: string }
@@ -38,7 +43,7 @@ test('check-doc-links：坏链接必须让检查失败（反向验证）', async
   await mkdir(root, { recursive: true })
   await writeFile(path.join(root, 'README.md'), '# 测试\n\n[坏链接](./missing-doc.md)\n', 'utf8')
 
-  const result = runChecker(root)
+  const result = runChecker(root, NO_FLOOR)
   assert.equal(result.code, 1, `坏链接必须导致退出码 1，实际 ${result.code}\n${result.output}`)
   assert.match(result.output, /missing-doc\.md/)
 })
@@ -52,7 +57,7 @@ test('check-doc-links：行内代码引用（含 docs/adr/NNNN 短引用）同�
     'utf8',
   )
 
-  const result = runChecker(root)
+  const result = runChecker(root, NO_FLOOR)
   assert.equal(result.code, 1)
   assert.match(result.output, /docs\/adr\/9999/)
   assert.match(result.output, /packages\/nope\/gone\.md/)
@@ -77,7 +82,7 @@ test('check-doc-links：好链接放行，通配与构建产物按边界跳过',
     'utf8',
   )
 
-  const result = runChecker(root)
+  const result = runChecker(root, NO_FLOOR)
   assert.equal(result.code, 0, result.output)
   assert.match(result.output, /检查通过/)
 })
