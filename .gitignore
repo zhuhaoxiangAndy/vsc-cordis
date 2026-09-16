@@ -7,6 +7,8 @@ coverage/
 *.log
 .DS_Store
 Thumbs.db
+# 热重载集成测试的临时工作区（测试运行时生成，不入库）
+packages/host/test/scratch/
 # 私钥绝不入库（见 docs/adr/0008-secret-management.md）
 *.key
 *.pem

@@ -46,10 +46,15 @@
           "default": 2000,
           "description": "单个副作用（effect）回收的超时时间；超时记入错误但继续回收。"
         },
-        "vscordis.unloadBeforeReload": {
+        "vscordis.hotReload": {
           "type": "boolean",
           "default": true,
-          "description": "重载前先完全卸载（保证无残留）；关闭可换取更快的重载速度。"
+          "description": "监听插件目录变化并自动重载（配合 npm run watch 实现 <1s 热重载，见 ADR-0011）。"
+        },
+        "vscordis.hotReloadDebounceMs": {
+          "type": "number",
+          "default": 150,
+          "description": "文件变化防抖窗口（毫秒）。esbuild 一次增量重建可能触发多个事件，聚合后再重载。"
         }
       }
     }
