@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { PluginEntry } from '@vscordis/kernel'
 import { discoverPlugins, sortByDependencies } from '../../host/src/discovery.ts'
 import { signPluginDirectory, verifyPluginArtifact } from '../../host/src/integrity.ts'
@@ -125,6 +126,117 @@ export async function runList(ctx: CommandContext, root: string): Promise<number
   for (const finding of graph.findings) ctx.out(`  ${finding.level === 'error' ? '✗' : '⚠'} ${finding.message}`)
 
   return problems.length > 0 || graph.findings.some((finding) => finding.level === 'error') ? 1 : 0
+}
+
+// ————————————————————————————————— doctor：环境自检
+
+interface DoctorLine {
+  readonly level: 'ok' | 'warn' | 'error'
+  readonly text: string
+}
+
+/**
+ * `vscordis doctor` —— **静态**环境自检。
+ *
+ * 它回答"跑起来之前能确定的事"：Node 是否够新、宿主包版本、插件根有没有清单问题、
+ * 隔离后端产物与验签公钥在不在。**不**回答"隔离在你的 VSCode 里是否真的可用"——
+ * 那需要手动验收（docs/acceptance-quick.md）。
+ *
+ * 退出码：只要有一处 `error` 就是 1；`warn` 不影响退出码（例如"还没构建"是可以修的常态）。
+ */
+export async function runDoctor(ctx: CommandContext, root: string): Promise<number> {
+  const lines: DoctorLine[] = []
+
+  // 1) Node 版本 vs 仓库 engines.node 的下界
+  const nodeFloor = readNodeFloor()
+  if (nodeFloor === undefined) {
+    lines.push({ level: 'warn', text: `Node ${process.version}（读不到 package.json 的 engines.node，跳过比较）` })
+  } else {
+    const [needMajor, needMinor] = nodeFloor
+    const [major = 0, minor = 0] = process.versions.node.split('.').map(Number)
+    const satisfied = major > needMajor || (major === needMajor && minor >= needMinor)
+    lines.push({
+      level: satisfied ? 'ok' : 'error',
+      text: `Node ${process.version}（仓库要求 >=${needMajor}.${needMinor}）`,
+    })
+  }
+
+  // 2) 宿主包版本（engines 提前检查的数据源）
+  const hostVersion = readHostVersion()
+  lines.push(
+    hostVersion === undefined
+      ? { level: 'warn', text: '读不到 packages/host/package.json 的版本（engines 检查会跳过）' }
+      : { level: 'ok', text: `宿主包版本 ${hostVersion}（packages/host/package.json）` },
+  )
+
+  // 3) 插件根与清单问题
+  const absoluteRoot = path.resolve(ctx.cwd, root)
+  if (!existsSync(absoluteRoot)) {
+    lines.push({
+      level: 'warn',
+      text: `插件根不存在：${absoluteRoot}（discovery 会当作空根；默认 plugins 在还没建目录时是正常的）`,
+    })
+  } else {
+    const { entries, problems } = await discover(absoluteRoot)
+    lines.push({
+      level: 'ok',
+      text: `插件根 ${absoluteRoot}：${entries.length} 个插件 / ${problems.length} 条清单问题`,
+    })
+    if (problems.length > 0) {
+      const shown = problems.slice(0, 3)
+      lines.push({ level: 'error', text: `清单问题（共 ${problems.length} 条，前 ${shown.length} 条）：` })
+      for (const problem of shown) lines.push({ level: 'error', text: `    ${problem}` })
+      if (problems.length > shown.length) {
+        lines.push({ level: 'error', text: `    …还有 ${problems.length - shown.length} 条` })
+      }
+    }
+  }
+
+  // 4) 构建产物与密钥：只影响特定能力，缺失按 warn 处理（可以修，不是配置错误）
+  const workerPath = path.join(cliRepoRoot(), 'packages', 'host', 'dist', 'isolated-worker.cjs')
+  lines.push(
+    existsSync(workerPath)
+      ? { level: 'ok', text: '隔离后端产物已构建（dist/isolated-worker.cjs）' }
+      : {
+          level: 'warn',
+          text: '隔离后端产物不存在：untrusted 插件会被 fail-closed 拒绝 —— 先跑 pnpm run build',
+        },
+  )
+  const publicKeyPath = path.join(cliRepoRoot(), 'packages', 'host', 'keys', 'vscordis-ed25519.pub.pem')
+  lines.push(
+    existsSync(publicKeyPath)
+      ? { level: 'ok', text: '验签公钥已就位（packages/host/keys/vscordis-ed25519.pub.pem）' }
+      : { level: 'warn', text: '验签公钥不存在：带签名的插件会被拒绝（docs/signing.md）' },
+  )
+
+  const icon = (level: DoctorLine['level']): string => (level === 'ok' ? '✓' : level === 'warn' ? '⚠' : '✗')
+  ctx.out('vscordis doctor —— 环境自检')
+  for (const line of lines) ctx.out(`  ${icon(line.level)} ${line.text}`)
+  const errors = lines.filter((line) => line.level === 'error').length
+  const warnings = lines.filter((line) => line.level === 'warn').length
+  ctx.out('')
+  ctx.out(`结论：${warnings} 条警告 / ${errors} 条错误`)
+  ctx.out('提示：doctor 只做静态自检；隔离与桥接的真实行为需要手动验收（docs/acceptance-quick.md）。')
+  return errors > 0 ? 1 : 0
+}
+
+/** 仓库根：CLI 的 `src/` 与 `dist/` 两种布局到它的相对深度相同。 */
+function cliRepoRoot(): string {
+  return fileURLToPath(new URL('../../../', import.meta.url))
+}
+
+/** 解析仓库根 `package.json` 的 `engines.node` 下界（只认 `>=x.y` 形态）。 */
+function readNodeFloor(): readonly [number, number] | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as {
+      engines?: { node?: unknown }
+    }
+    const range = typeof raw.engines?.node === 'string' ? raw.engines.node : ''
+    const match = /^>=\s*(\d+)\.(\d+)/.exec(range)
+    return match === null ? undefined : [Number(match[1]), Number(match[2])]
+  } catch {
+    return undefined
+  }
 }
 
 export async function runCreate(

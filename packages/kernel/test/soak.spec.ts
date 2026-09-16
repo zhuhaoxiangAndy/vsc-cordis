@@ -350,3 +350,74 @@ test('规模：300 插件依赖链加载 → 卸载，结构归零且耗时远�
 
   await host.dispose()
 })
+
+/**
+ * 规模证据（第二种昂贵拓扑）：**扇出** —— 1 个提供者 + 300 个消费者。
+ *
+ * 与长链互补：长链贵在"每次撤销都要沿链算传递闭包"，扇出贵在"一次撤销要同时影响 300 个消费者"
+ * （`affectedBy` 要遍历 300 条依赖边，然后逐个暂停）。两者都是真实插件生态里常见的形状。
+ */
+test('规模：1 提供者 + 300 消费者的扇出，级联暂停后结构归零', async () => {
+  const COUNT = 300
+  const port = new FakeHostPort()
+  const provider = makeEntry('hub-provider', {
+    permissions: ['vscode:commands.register'],
+    provides: ['hub'],
+  })
+  const consumers: ReturnType<typeof makeEntry>[] = []
+
+  port.define('hub-provider', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.provide('hub', { n: 1 }, { version: '1.0.0' })
+      ctx.effect(
+        () => ctx.vscode.commands.registerCommand('hub.run', () => 1),
+        (disposable) => disposable.dispose(),
+        'cmd:hub',
+      )
+    },
+  }))
+  for (let index = 0; index < COUNT; index += 1) {
+    const id = `leaf-${index}`
+    port.define(id, (): CordisPlugin => ({
+      activate(ctx) {
+        ctx.use('hub')
+        ctx.effect(
+          () => ctx.vscode.commands.registerCommand(`${id}.run`, () => index),
+          (disposable) => disposable.dispose(),
+          `cmd:${id}`,
+        )
+      },
+    }))
+    consumers.push(
+      makeEntry(id, { permissions: ['vscode:commands.register'], dependencies: { hub: '^1.0.0' } }),
+    )
+  }
+
+  const host = new PluginHost({ port, disposeTimeoutMs: 200, activationTimeoutMs: 5_000 })
+  const started = Date.now()
+
+  await host.load(provider)
+  for (const consumer of consumers) await host.load(consumer)
+  await host.settle()
+  assert.equal(host.registry.providedServices().length, 1)
+  assert.equal(port.commands.size, COUNT + 1, '1 个提供者命令 + 300 个消费者命令')
+
+  // 先卸载提供者：300 个消费者必须在这一次级联里全部暂停（扇出最贵的路径）
+  await host.unload('hub-provider')
+  await host.settle()
+  const paused = host.list().filter((view) => view.state === 'paused')
+  assert.equal(paused.length, COUNT, `提供者卸载后应有 ${COUNT} 个消费者 paused`)
+  assert.equal(host.registry.size, 0, '提供者退出后注册表不该留下服务槽位')
+  assert.equal(port.commands.size, 0, '暂停是完整卸载：所有消费者命令都应消失')
+
+  await host.unloadAll()
+  await host.settle()
+  const elapsed = Date.now() - started
+
+  assert.deepEqual(host.list(), [])
+  assert.equal(port.commands.size, 0)
+  console.log(`  [规模] 扇出 1+${COUNT}：加载 + 级联暂停 + 卸载共 ${elapsed}ms`)
+  assert.ok(elapsed < 10_000, `扇出 1+${COUNT} 耗时 ${elapsed}ms，超过宽松上界 10s`)
+
+  await host.dispose()
+})

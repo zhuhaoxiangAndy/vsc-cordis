@@ -260,3 +260,37 @@ test('tree：--mermaid 与 --json 同时给 → 用法错误（退出码 2，而
   assert.equal(result.code, 2)
   assert.match(result.err, /不能同时使用/)
 })
+
+test('doctor：仓库内自检通过（Node / 宿主版本 / 插件根 / 验签公钥）', async () => {
+  const result = await run(['doctor'])
+
+  assert.equal(result.code, 0, `doctor 不应有 error：\n${result.out}`)
+  assert.match(result.out, /vscordis doctor/)
+  assert.match(result.out, /Node v/)
+  assert.match(result.out, /宿主包版本 \d+\.\d+\.\d+/)
+  assert.match(result.out, /插件根 .*：\d+ 个插件 \/ \d+ 条清单问题/)
+  assert.match(result.out, /验签公钥已就位/)
+  assert.match(result.out, /结论：\d+ 条警告 \/ \d+ 条错误/)
+  // 明确划界：doctor 不做真实行为验证
+  assert.match(result.out, /acceptance-quick\.md/)
+})
+
+test('doctor：插件根里有坏清单 → error 级问题并退出码 1', async () => {
+  const root = path.join(scratch, `doctor-broken-${runId}`)
+  // main 指向插件目录之外 → 清单校验失败（这正是 `vscordis list` 会跳过的那类问题）
+  await writePlugin(root, 'broken', { main: '../escape.cjs' })
+
+  const result = await run(['doctor', '--root', root])
+  assert.equal(result.code, 1)
+  assert.match(result.out, /清单问题/)
+  assert.match(result.out, /✗/)
+})
+
+test('doctor：插件根不存在只是 warn（discovery 把它当作空根，退出码 0）', async () => {
+  const root = path.join(scratch, `doctor-missing-${runId}`)
+
+  const result = await run(['doctor', '--root', root])
+  assert.equal(result.code, 0, result.out)
+  assert.match(result.out, /插件根不存在/)
+  assert.match(result.out, /0 条错误/)
+})
