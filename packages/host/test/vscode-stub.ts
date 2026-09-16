@@ -25,7 +25,15 @@ export interface StubOutputChannel {
   readonly name: string
   readonly lines: string[]
   disposed: number
+  shown: boolean
   appendLine(line: string): void
+  trace(message: string): void
+  debug(message: string): void
+  info(message: string): void
+  warn(message: string): void
+  error(message: string): void
+  show(): void
+  hide(): void
   dispose(): void
 }
 
@@ -83,6 +91,14 @@ export function emitActiveEditor(editor: unknown): void {
   for (const listener of [...state.activeEditorListeners]) listener(editor)
 }
 
+/** 测试用：设置 `section.key` 的配置值（`workspace.getConfiguration(section).get(key, …)` 会读到）。 */
+export function setConfig(section: string, key: string, value: unknown): void {
+  state.config.set(`${section}.${key}`, value)
+}
+
+/** 真实 API 里 `vscode.version` 是一个字符串常量；runtime 会把它作为 engines.vscode 的比对值。 */
+export const version = '0.0.0-stub'
+
 export const commands = {
   registerCommand(command: string, callback: (...args: unknown[]) => unknown): StubDisposable {
     state.commands.set(command, callback)
@@ -137,8 +153,30 @@ export const window = {
       name,
       lines: [],
       disposed: 0,
+      shown: false,
       appendLine: (line: string) => {
         channel.lines.push(line)
+      },
+      trace: (message: string) => {
+        channel.lines.push(`[trace] ${message}`)
+      },
+      debug: (message: string) => {
+        channel.lines.push(`[debug] ${message}`)
+      },
+      info: (message: string) => {
+        channel.lines.push(`[info] ${message}`)
+      },
+      warn: (message: string) => {
+        channel.lines.push(`[warn] ${message}`)
+      },
+      error: (message: string) => {
+        channel.lines.push(`[error] ${message}`)
+      },
+      show: () => {
+        channel.shown = true
+      },
+      hide: () => {
+        channel.shown = false
       },
       dispose: () => {
         channel.disposed += 1

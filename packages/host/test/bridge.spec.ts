@@ -34,7 +34,7 @@ registerHooks({
 })
 
 // 必须在 registerHooks 之后动态导入：静态 import 会先求值 bridge.ts（那时 'vscode' 还没被替换）
-const stub = await import(stubUrl)
+const stub = (await import(stubUrl)) as typeof import('./vscode-stub.ts')
 const { VscodeBridge } = await import('../src/bridge.ts')
 
 type BridgeOptions = ConstructorParameters<typeof VscodeBridge>[0]
