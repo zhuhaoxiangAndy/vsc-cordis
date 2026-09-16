@@ -46,6 +46,11 @@
           "default": 2000,
           "description": "单个副作用（effect）回收的超时时间；超时记入错误但继续回收。"
         },
+        "vscordis.activationTimeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "description": "插件 activate() 的时限。所有生命周期操作共用一条串行队列，没有这个上限时一个永不返回的 activate 会永久卡死宿主（连卸载它自己都排在后面）。超时后先发 AbortSignal 再回滚。"
+        },
         "vscordis.hotReload": {
           "type": "boolean",
           "default": true,

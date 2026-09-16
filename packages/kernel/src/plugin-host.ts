@@ -63,6 +63,14 @@ export interface PluginHostOptions {
   readonly registry?: ServiceRegistry
   /** in-flight 调用的强制回收上限；默认 2000ms（ADR-0007 决策 6）。 */
   readonly disposeTimeoutMs?: number
+  /**
+   * 单个插件 `activate()` 的时限；默认 15000ms。
+   *
+   * 为什么必须有：所有生命周期操作共用一条**串行队列**，一个永不 resolve 的 `activate`
+   * 会把队列永久卡住 —— 连"卸载这个插件"都排在它后面。那不只是这个插件坏了，
+   * 而是整个宿主失去响应。超时不是为了让慢插件更快，而是为了让宿主**始终可恢复**。
+   */
+  readonly activationTimeoutMs?: number
   readonly onTransition?: (event: TransitionEvent) => void
 }
 
@@ -71,6 +79,7 @@ export class PluginHost {
   readonly #registry: ServiceRegistry
   readonly #records = new Map<PluginId, PluginRecord>()
   readonly #disposeTimeoutMs: number
+  readonly #activationTimeoutMs: number
   readonly #onTransition: ((event: TransitionEvent) => void) | undefined
   readonly #subscriptions: { dispose(): void }[] = []
   #queue: Promise<void> = Promise.resolve()
@@ -79,6 +88,7 @@ export class PluginHost {
   constructor(options: PluginHostOptions) {
     this.#port = options.port
     this.#disposeTimeoutMs = options.disposeTimeoutMs ?? 2_000
+    this.#activationTimeoutMs = options.activationTimeoutMs ?? 15_000
     this.#onTransition = options.onTransition
     this.#registry =
       options.registry ??
@@ -264,7 +274,18 @@ export class PluginHost {
         signal: abort.signal,
       })
       record.ctx = ctx
-      await loaded.plugin.activate(ctx)
+      try {
+        await withTimeout(
+          Promise.resolve(loaded.plugin.activate(ctx)),
+          this.#activationTimeoutMs,
+          `插件 ${manifest.id} 的 activate()`,
+        )
+      } catch (error) {
+        // 超时或失败都要先发卸载信号：插件的异步工作可能还在跑，必须让它有机会停下来，
+        // 否则"回滚"只是把宿主侧的状态清掉，插件侧仍留着一个活的异步任务。
+        abort.abort()
+        throw error
+      }
       record.missing = []
       this.#checkProvidesDrift(record)
       this.#setState(record, 'active', reason)
@@ -340,6 +361,8 @@ export class PluginHost {
    */
   #handleServiceChange(event: ServiceChangeEvent): void {
     if (this.#disposed) return
+    // 注意这里的 catch：`void promise` 只丢弃返回值，不处理拒绝 ——
+    // 一旦这个任务抛出，Node 会报未处理的 rejection，而调用方（注册表事件）根本无从感知。
     void this.#enqueue(async () => {
       if (this.#disposed) return
       for (const id of event.affected) {
@@ -348,6 +371,12 @@ export class PluginHost {
         await this.#deactivateTo(record, 'paused', `硬依赖 "${event.name}" 被撤销`)
       }
       await this.#resumeReady(`服务 "${event.name}" ${event.kind}`)
+    }).catch((error: unknown) => {
+      this.#port.log('error', '处理服务变化事件时抛错（已吞掉，避免未处理的 rejection）', {
+        service: event.name,
+        kind: event.kind,
+        error: describe(error),
+      })
     })
   }
 

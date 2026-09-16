@@ -34,6 +34,8 @@ export class Runtime {
   readonly #watcher: PluginWatcher
   readonly #workerPath: string
   readonly #supportsIsolation: boolean
+  /** 保留引用是为了状态面板能报告"当前有几个隔离子进程"——诊断信息不该只活在测试里。 */
+  readonly #isolatedLoader: IsolatedPluginLoader
   /** 规范化目录 → 插件 id。热重载要靠目录反查 id；目录被删除时也靠它决定卸载谁。 */
   readonly #dirToId = new Map<string, string>()
   #lastReloadMs = 0
@@ -63,8 +65,7 @@ export class Runtime {
     this.#supportsIsolation = options.supportsIsolation ?? existsSync(this.#workerPath)
 
     const isolatedLoader = new IsolatedPluginLoader({
-      hostApi: new VscodeHostApi({
-        isPluginCommand: (command) => this.bridge.livePluginCommands().some((info) => info.command === command),
+      hostApi: new VscodeHostApi({        isPluginCommand: (command) => this.bridge.livePluginCommands().some((info) => info.command === command),
         // 权限只能由宿主查清单得出：让子进程自述等于允许它给自己提权。
         permissionsOf: (id) => {
           const entry = this.#entries.find((candidate) => candidate.manifest.id === id)
@@ -86,6 +87,7 @@ export class Runtime {
         .get<boolean>('isolation.permissionModel', true),
       onLog: (message) => this.bridge.log('debug', message),
     })
+    this.#isolatedLoader = isolatedLoader
 
     // 按 trust 路由：untrusted 走子进程，其余走 in-process。
     // 路由放在这里而不是 bridge 里，是为了让 bridge 不必知道隔离的存在。
@@ -103,6 +105,7 @@ export class Runtime {
     this.host = new PluginHost({
       port: this.bridge,
       disposeTimeoutMs: readDisposeTimeoutMs(),
+      activationTimeoutMs: readActivationTimeoutMs(),
       onTransition: (event) => {
         this.bridge.log('debug', `[状态] ${event.id}: ${event.from} → ${event.to}（${event.reason}）`)
       },
@@ -112,7 +115,10 @@ export class Runtime {
       roots: () => this.#pluginRoots().map((root) => root.dir),
       debounceMs: readHotReloadDebounceMs(),
       onPlan: (plan) => {
-        void this.#handleReloadPlan(plan)
+        // 同 kernel 里的理由：`void promise` 不处理拒绝，必须自己吞掉并记日志。
+        void this.#handleReloadPlan(plan).catch((error: unknown) => {
+          this.bridge.log('error', `[热重载] 处理变更计划时抛错：${describe(error)}`)
+        })
       },
       onError: (error) => {
         // 插件根不存在 / 不可递归监听都只记日志：不该让热重载整体失效。
@@ -362,7 +368,11 @@ export class Runtime {
     const lines: string[] = []
     lines.push(`VSCordis 运行时状态（${new Date().toISOString()}）`)
     lines.push(
-      `隔离子进程：${this.#supportsIsolation ? `可用（${path.relative(this.#extensionUri.fsPath, this.#workerPath)}）` : '不可用 —— untrusted 插件会被拒绝加载'}`,
+      `隔离子进程：${this.#supportsIsolation ? `可用（${path.relative(this.#extensionUri.fsPath, this.#workerPath)}）` : '不可用 —— untrusted 插件会被拒绝加载'}` +
+        ` · 活跃会话 ${this.#isolatedLoader.activeSessions}` +
+        (this.#isolatedLoader.activeSessions === 0
+          ? ''
+          : `（${this.#isolatedLoader.activeSessionIds().join(', ')}）`),
     )
     lines.push(
       `完整性校验：${this.#publicKeyPem === undefined ? '⚠ 未配置验签公钥（带签名的插件会被拒绝）' : '已配置验签公钥'}` +
@@ -484,4 +494,16 @@ function statusIcon(view: PluginView): string {
 function readDisposeTimeoutMs(): number {
   const configured = vscode.workspace.getConfiguration('vscordis').get<number>('disposeTimeoutMs', 2000)
   return Number.isFinite(configured) && configured > 0 ? configured : 2000
+}
+
+/**
+ * `activate()` 的时限。
+ *
+ * 默认给到 15s：插件的激活确实可能做网络请求或读大文件，太紧会误杀正常插件。
+ * 但**不能没有** —— 没有它的话，一个永不 resolve 的 activate 会把串行队列永久卡住，
+ * 连"卸载这个插件"都排在它后面，宿主再也回不来。
+ */
+function readActivationTimeoutMs(): number {
+  const configured = vscode.workspace.getConfiguration('vscordis').get<number>('activationTimeoutMs', 15_000)
+  return Number.isFinite(configured) && configured > 0 ? configured : 15_000
 }
