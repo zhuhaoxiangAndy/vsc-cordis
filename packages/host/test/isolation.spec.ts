@@ -691,6 +691,25 @@ test('ADR-0020：node_modules 下指向无同名 package.json 的外部链接仍
   assert.equal(loader.sessionsStarted, 0, '仍然必须在 fork 前拒绝，不能起子进程')
 })
 
+test('ADR-0020：node_modules/.bin 外部链接 fail-closed', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture('workspace-bin-link', `module.exports = { activate() {} }\n`)
+  const externalDir = path.join(scratch, 'workspace-bin-target')
+  await mkdir(externalDir, { recursive: true })
+  const binDir = path.join(entry.root, 'node_modules', '.bin')
+  await mkdir(binDir, { recursive: true })
+  const link = path.join(binDir, 'leak')
+  try {
+    await symlink(externalDir, link, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+
+  const { host, loader } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), /指向目录外的链接/)
+  assert.equal(loader.sessionsStarted, 0, '.bin 外部链接同样必须在 fork 前拒绝')
+})
+
 test('环境变量：实际 fork 默认不继承宿主敏感变量，inheritEnv=true 才继承（ADR-0021）', async () => {
   const previous = process.env.VSCORDIS_ENV_PROBE
   process.env.VSCORDIS_ENV_PROBE = 'HOST_SECRET_VALUE'

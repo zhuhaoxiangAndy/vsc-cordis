@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { readdir, realpath } from 'node:fs/promises'
 import * as path from 'node:path'
 
@@ -54,31 +54,14 @@ function readPackageName(directory: string): string | undefined {
   }
 }
 
-/** 从 target（文件或目录）向上找最近一个包目录，返回其 package.json#name。 */
-function nearestPackageName(target: string): string | undefined {
-  let current: string
-  try {
-    current = statSync(target).isDirectory() ? target : path.dirname(target)
-  } catch {
-    return undefined
-  }
-  for (;;) {
-    const name = readPackageName(current)
-    if (name !== undefined) return name
-    const parent = path.dirname(current)
-    if (parent === current) return undefined
-    current = parent
-  }
-}
-
 /**
- * `node_modules` 下的外部链接只允许两类形态，避免把 pnpm workspace 依赖误伤成逃逸：
+ * `node_modules` 下的外部链接只允许普通依赖链接：
+ * `node_modules/<pkg>` / `node_modules/@scope/<pkg>`，且目标目录 `package.json#name` 必须等于链接名
+ * （`@vscordis/sdk -> packages/sdk` 因此放行）。
  *
- * - `node_modules/<pkg>` / `node_modules/@scope/<pkg>`：目标目录的 `package.json#name`
- *   必须等于链接名（`@vscordis/sdk -> packages/sdk` 因此放行）；
- * - `node_modules/.bin/<name>`：目标必须位于某个包目录内（向上能找到 package.json）。
- *
- * 指向 `.ssh` / 系统目录的任意链接仍然会被拒绝（目标没有同名 package.json）。
+ * `node_modules/.bin` 的外部链接**不放行**：它是开发期产物，而插件 `main` 必须是单文件 bundle，
+ * 运行期不需要它；"向上找 package.json" 的判定可能被家目录 package.json 放水，所以 fail-closed。
+ * 指向 `.ssh` / 系统目录的任意链接仍然拒绝。
  */
 function isAllowedDependencyLink(realRoot: string, link: string, target: string): boolean {
   const relative = path.relative(realRoot, link)
@@ -99,9 +82,7 @@ function isAllowedDependencyLink(realRoot: string, link: string, target: string)
 
   const tail = segments.slice(nodeModulesIndex + 1)
   const first = tail[0]
-  if (first === undefined) return false
-
-  if (first === '.bin') return nearestPackageName(target) !== undefined
+  if (first === undefined || first === '.bin') return false
 
   const packageName = first.startsWith('@') ? `${first}/${tail[1] ?? ''}` : first
   if (packageName.endsWith('/') || packageName.includes('..')) return false
