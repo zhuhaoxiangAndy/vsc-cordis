@@ -83,6 +83,39 @@ test('版本满足时不产生提示', () => {
   assert.deepEqual(graph.findings, [])
 })
 
+// ————————————————————————————————— ADR-0017：engines 的提前检查
+
+test('engines.vscordis 不满足 → warning，并说明加载期会拒绝（ADR-0017）', () => {
+  const graph = buildGraph([plugin('needs-new-host', { engines: { vscordis: '^2.0.0' } })], {
+    hostVersion: '0.1.0',
+  })
+  const warning = graph.findings.find((candidate) => candidate.message.includes('engines.vscordis'))
+  assert.ok(warning !== undefined)
+  assert.equal(warning.level, 'warning')
+  assert.match(warning.message, /加载期会直接拒绝/)
+  assert.match(warning.message, /ADR-0017/)
+})
+
+test('engines.vscordis 满足（含预发布宿主版本归一化）→ 无提示', () => {
+  const graph = buildGraph([plugin('needs-old-host', { engines: { vscordis: '>=0.1.0' } })], {
+    // 归一化后是 0.1.0，应当满足 —— 与宿主 `#assertEnginesCompatible` 用同一条规则
+    hostVersion: '0.1.0-beta.3',
+  })
+  assert.deepEqual(graph.findings, [])
+})
+
+test('不传 hostVersion → 跳过 engines 检查（buildGraph 保持纯函数、无 IO）', () => {
+  const graph = buildGraph([plugin('unknown-host', { engines: { vscordis: '^9.0.0' } })])
+  assert.deepEqual(graph.findings, [])
+})
+
+test('engines.vscode 不去猜：CLI 不知道用户装了哪个 VSCode，不产生提示', () => {
+  const graph = buildGraph([plugin('needs-vscode', { engines: { vscode: '^9.0.0' } })], {
+    hostVersion: '0.1.0',
+  })
+  assert.deepEqual(graph.findings, [])
+})
+
 test('findings 排序：error 在前', () => {
   const graph = buildGraph([
     plugin('iso', { trust: 'untrusted', provides: ['clock'] }),

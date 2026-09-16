@@ -4,7 +4,7 @@ export type { EffectStackOptions } from './effect-stack.ts'
 export { ServiceRegistry } from './service-registry.ts'
 export type { RegistryListener, ServiceChangeEvent, ServiceProviderRecord } from './service-registry.ts'
 
-export { PluginHost, describe } from './plugin-host.ts'
+export { PluginHost, describe, normalizeVersion } from './plugin-host.ts'
 export type {
   PluginHostOptions,
   PluginRecord,
@@ -34,6 +34,7 @@ export {
   PermissionDeniedError,
   PluginAlreadyLoadedError,
   PluginEngineMismatchError,
+  RemoteServiceError,
   ServiceConflictError,
   ServiceUnavailableError,
   ServiceVersionMismatchError,

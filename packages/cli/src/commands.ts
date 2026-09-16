@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
 import type { PluginEntry } from '@vscordis/kernel'
@@ -34,7 +34,27 @@ export function toGraphPlugins(entries: readonly PluginEntry[]): GraphPlugin[] {
     trust: entry.manifest.trust,
     provides: entry.manifest.provides,
     dependencies: entry.manifest.dependencies,
+    engines: entry.manifest.engines,
   }))
+}
+
+/**
+ * 仓库内宿主扩展的版本（读 `packages/host/package.json`，供 engines 提前检查）。
+ *
+ * 用 `import.meta.url` 相对定位：`src/commands.ts` 与打包后的 `dist/cli.mjs` 到
+ * `packages/host/package.json` 的相对深度相同，两种布局都成立。
+ * 读不到就返回 `undefined` —— CLI 的 engines 检查是**提前提示**，不是强制点
+ * （强制在加载期，见 ADR-0017）。
+ */
+export function readHostVersion(): string | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(new URL('../../host/package.json', import.meta.url), 'utf8')) as {
+      version?: unknown
+    }
+    return typeof raw.version === 'string' ? raw.version : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export async function runTree(ctx: CommandContext, root: string, mermaid: boolean): Promise<number> {
@@ -44,7 +64,7 @@ export async function runTree(ctx: CommandContext, root: string, mermaid: boolea
     return 1
   }
 
-  const graph = buildGraph(toGraphPlugins(entries))
+  const graph = buildGraph(toGraphPlugins(entries), { hostVersion: readHostVersion() })
   ctx.out(mermaid ? renderMermaid(graph) : renderText(graph))
 
   if (problems.length > 0) {
@@ -59,7 +79,7 @@ export async function runTree(ctx: CommandContext, root: string, mermaid: boolea
 
 export async function runList(ctx: CommandContext, root: string): Promise<number> {
   const { entries, problems } = await discover(root)
-  const graph = buildGraph(toGraphPlugins(entries))
+  const graph = buildGraph(toGraphPlugins(entries), { hostVersion: readHostVersion() })
 
   ctx.out(`插件（${entries.length}）目录：${path.resolve(root)}`)
   if (entries.length === 0) ctx.out('  <无>')

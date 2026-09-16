@@ -209,3 +209,23 @@ test('dev：只有 dist 没有 src 的插件同样被判为不可构建', async 
   assert.equal(result.code, 1)
   assert.match(result.err, /没有找到可构建的插件/)
 })
+
+test('list：engines.vscordis 与仓库内宿主版本不匹配 → warning 并指向 ADR-0017', async () => {
+  const root = path.join(scratch, `engines-${runId}`)
+  await writePlugin(root, 'needs-new-host', { engines: { vscordis: '^9.0.0' } })
+
+  const result = await run(['list', '--root', root])
+
+  // CLI 的 engines 检查只是**提前提示**：不匹配不是 error（强制点在加载期）
+  assert.equal(result.code, 0)
+  assert.match(result.out, /engines\.vscordis = \^9\.0\.0/)
+  assert.match(result.out, /ADR-0017/)
+})
+
+test('readHostVersion：与 packages/host/package.json 的 version 一致（src/dist 相对深度相同）', async () => {
+  const { readHostVersion } = await import('../src/commands.ts')
+  const pkg = JSON.parse(
+    readFileSync(path.join(repoRoot, 'packages', 'host', 'package.json'), 'utf8'),
+  ) as { version: string }
+  assert.equal(readHostVersion(), pkg.version)
+})

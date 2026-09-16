@@ -13,7 +13,7 @@
  *   若它们声明了 provides/dependencies，这里会给出提示。
  */
 
-import { satisfies } from '@vscordis/kernel'
+import { normalizeVersion, satisfies } from '@vscordis/kernel'
 
 export interface GraphPlugin {
   readonly id: string
@@ -22,6 +22,8 @@ export interface GraphPlugin {
   readonly trust: string
   readonly provides: readonly string[]
   readonly dependencies: Readonly<Record<string, string>>
+  /** `plugin.json#engines`（ADR-0017 的强制字段；CLI 用它做**提前**提示）。 */
+  readonly engines?: { readonly vscordis?: string; readonly vscode?: string }
 }
 
 export interface GraphService {
@@ -44,7 +46,17 @@ export interface DependencyGraph {
   readonly consumers: Readonly<Record<string, readonly string[]>>
 }
 
-export function buildGraph(plugins: readonly GraphPlugin[]): DependencyGraph {
+export interface BuildGraphOptions {
+  /**
+   * 仓库内宿主扩展的版本（由 CLI 读 `packages/host/package.json` 传入）。
+   *
+   * 不传 = 跳过 engines 检查：`buildGraph` 保持**纯函数、无 IO**（ADR-0014），
+   * 版本来自调用方注入；测试因此可以只测算法，不碰文件系统。
+   */
+  readonly hostVersion?: string
+}
+
+export function buildGraph(plugins: readonly GraphPlugin[], options: BuildGraphOptions = {}): DependencyGraph {
   const findings: GraphFinding[] = []
   const services = new Map<string, string[]>()
   const consumers = new Map<string, string[]>()
@@ -95,6 +107,25 @@ export function buildGraph(plugins: readonly GraphPlugin[]): DependencyGraph {
               '注意：服务的实际版本由运行期 ctx.provide({ version }) 决定，此提示仅供参考',
           })
         }
+      }
+    }
+  }
+
+  // engines.vscordis：加载期是**强制**检查（ADR-0017），CLI 把同一判断**提前**给出。
+  // engines.vscode 刻意不检查：CLI 不知道用户实际装了哪个 VSCode，猜一个版本报错比不报更糟。
+  if (options.hostVersion !== undefined) {
+    const actual = normalizeVersion(options.hostVersion)
+    for (const plugin of plugins) {
+      const range = plugin.engines?.vscordis
+      if (range === undefined) continue
+      if (!satisfies(actual, range)) {
+        findings.push({
+          level: 'warning',
+          message:
+            `插件 "${plugin.id}" 声明 engines.vscordis = ${range}，而仓库内宿主版本是 ${options.hostVersion}` +
+            ` —— 版本不匹配时加载期会直接拒绝（ADR-0017）。CLI 的检查只是提前提示，` +
+            '若你的目标宿主是另一个版本请忽略本条。',
+        })
       }
     }
   }

@@ -585,8 +585,13 @@ export function describe(error: unknown): string {
   return String(error)
 }
 
-/** 去掉 `-prerelease` / `+build` 后缀：`semver-mini` 只认 `x.y.z`（见 #assertEnginesCompatible）。 */
-function normalizeVersion(version: string): string {
+/**
+ * 去掉 `-prerelease` / `+build` 后缀：`semver-mini` 只认 `x.y.z`（见 `#assertEnginesCompatible`）。
+ *
+ * 导出给 CLI 复用（engines 的提前检查）：两处必须用同一个归一化规则，否则会出现
+ * "宿主接受、CLI 报错"这种自相矛盾的提示。
+ */
+export function normalizeVersion(version: string): string {
   return version.trim().split(/[-+]/)[0] ?? version
 }
 

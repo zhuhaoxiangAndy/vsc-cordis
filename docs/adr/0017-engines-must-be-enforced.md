@@ -70,9 +70,16 @@
 
 ## 未覆盖
 
-- CLI 的 `list` / `tree` **没有**做引擎兼容性检查（它们不读宿主版本）。
-  加载期的强制已经能拦住，CLI 的问题只是"不够提前"。要补的话应当读
-  `packages/host/package.json` 的版本 —— 那会给 CLI 增加一层对宿主包的耦合，暂不做。
+- ~~CLI 的 `list` / `tree` 没有做引擎兼容性检查~~ → 已补（本轮）：
+  CLI 读 `packages/host/package.json` 的版本（`readHostVersion()`，用 `import.meta.url` 相对定位，
+  `src/commands.ts` 与 `dist/cli.mjs` 两种布局的相对深度相同），把 `engines.vscordis` 的判断**提前**：
+  - 级别是 **warning 不是 error**：CLI 未必对"最终加载它的宿主"说话，用户可能拿另一个版本的宿主去加载；
+    强制点仍在加载期（`PluginHost.#assertEnginesCompatible`）。
+  - 版本归一化与宿主共用 `normalizeVersion`（已从 kernel 导出），避免"宿主接受、CLI 报错"这种自相矛盾。
+  - 读不到 `package.json` 就**跳过检查**（例如被裁剪的打包环境）—— 提前提示不是强制点。
+  - `engines.vscode` 仍然**不检查**：CLI 不知道用户装了哪个 VSCode，猜一个版本报错比不报更糟。
+  - 代价（原本的顾虑）：CLI 多了一层对宿主包的路径耦合。接受它 —— 用 `import.meta.url` 定位，
+    并有测试断言 `readHostVersion()` 与 `packages/host/package.json` 的 `version` 一致。
 - `engines.vscode` 用的是**我们自己的**范围子集，与 VSCode 官方扩展清单的 `engines.vscode`
   语义不完全相同（官方支持 `^1.95.0` 这类，但也接受更宽的写法）。这里刻意保持最小区集，
   并在清单校验期对超出子集的写法**报错**，而不是猜测作者意图。
