@@ -25,7 +25,10 @@
 | `packages/host` | `vscordis` | **唯一发布单元**：VSCode 扩展。把真实 API 桥接成受控面，负责加载/卸载/依赖协调/热重载。 |
 | `packages/cli` | `@vscordis/cli` | **开发工具**：`create` / `list` / `tree`（依赖图 + Mermaid）/ `sign` / `dev`。 |
 | `plugins/*` | — | 示例插件（esbuild 打成单文件 CJS）。 |
+| `docs/design/overview.md` | — | **架构总览**：分层理由、核心不变式、生命周期走查、贡献者地图。 |
+| `docs/plugin-authoring.md` | — | **插件作者指南**：字段速查、权限速查、两种模式差异、会静默失败的写法、调试手册。 |
 | `docs/adr` | — | 架构决策记录，每条含权衡与否决方案。 |
+| `docs/signing.md` | — | 签名与完整性校验操作手册。 |
 | `docs/acceptance-*.md` | — | 手动验收步骤、时延预算与未覆盖范围。 |
 
 ## 快速开始
