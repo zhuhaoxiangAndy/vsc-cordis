@@ -104,5 +104,5 @@ node scripts/sign-plugin.mjs plugins/hello
 同进程加载的插件可以绕开受控 API 直接拿到 `vscode` 模块（ADR-0003 有源码级证据），
 因此 `trust: trusted` 的插件在安全上只防误用、不防恶意。
 
-真正的边界是**子进程隔离**（M4b，当前 `trust: untrusted` 会被 fail-closed 拒绝加载）。
-**签名与隔离是互补的两件事，不能互相替代。**
+真正的边界是**子进程隔离**（M4b，见 ADR-0013/0019）：有隔离后端时 `trust: untrusted` 在子进程
+运行；**没有**隔离后端或 Web 宿主才 fail-closed 拒绝加载。**签名与隔离是互补的两件事，不能互相替代。**

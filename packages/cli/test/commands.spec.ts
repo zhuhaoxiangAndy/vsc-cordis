@@ -95,7 +95,7 @@ test('create：--trust untrusted 会附上隔离限制说明', async () => {
   const result = await run(['create', 'iso-demo', '--dir', root, '--trust', 'untrusted'])
   assert.equal(result.code, 0)
   assert.match(result.out, /独立子进程/)
-  assert.match(result.out, /不能用 ctx\.use/)
+  assert.match(result.out, /同步 ctx\.use 会被拒绝/)
 })
 
 test('create：--trust 非法值被拒绝', async () => {

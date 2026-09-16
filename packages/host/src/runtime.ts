@@ -38,6 +38,8 @@ export class Runtime {
   readonly #supportsIsolation: boolean
   /** 保留引用是为了状态面板能报告"当前有几个隔离子进程"——诊断信息不该只活在测试里。 */
   readonly #isolatedLoader: IsolatedPluginLoader
+  /** 热重载计划串行队列：快速保存产生多个 plan 时不能并发 refresh/load/reload（审计 F2）。 */
+  #reloadQueue: Promise<void> = Promise.resolve()
   /** 规范化目录 → 插件 id。热重载要靠目录反查 id；目录被删除时也靠它决定卸载谁。 */
   readonly #dirToId = new Map<string, string>()
   #lastReloadMs = 0
@@ -145,10 +147,13 @@ export class Runtime {
       roots: () => this.#pluginRoots().map((root) => root.dir),
       debounceMs: readHotReloadDebounceMs(),
       onPlan: (plan) => {
-        // 同 kernel 里的理由：`void promise` 不处理拒绝，必须自己吞掉并记日志。
-        void this.#handleReloadPlan(plan).catch((error: unknown) => {
-          this.bridge.log('error', `[热重载] 处理变更计划时抛错：${describe(error)}`)
-        })
+        // 串行化：debounce 只能合并同一窗口内的事件；快速保存可能产生多个 plan，
+        // 慢 activate 下并发处理会让 refresh/load/reload 交错（审计探针已指出）。
+        this.#reloadQueue = this.#reloadQueue
+          .then(() => this.#handleReloadPlan(plan))
+          .catch((error: unknown) => {
+            this.bridge.log('error', `[热重载] 处理变更计划时抛错：${describe(error)}`)
+          })
       },
       onError: (error) => {
         // 插件根不存在 / 不可递归监听都只记日志：不该让热重载整体失效。
@@ -517,6 +522,8 @@ export class Runtime {
 
   async dispose(): Promise<void> {
     this.#watcher.dispose()
+    // 先停监听（不再产生新 plan），再等已排队的 plan 跑完，最后才拆宿主。
+    await this.#reloadQueue.catch(() => undefined)
     await this.host.dispose()
   }
 }

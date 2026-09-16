@@ -147,8 +147,9 @@ ctx.effect(() => item, (i) => i.dispose(), 'status:my-plugin')
 
 支持 `text / tooltip / command / color / name / accessibilityInformation` 与 `show / hide / dispose`；
 `alignment` / `priority` 只在创建时生效。**设置其它属性会抛错**（而不是静默无效）。
-若你的插件用到了上表里标 ❌ 的能力，选 `trusted`（并接受"只防误用"这个事实），
-或者等对应的隔离能力补齐（见 ADR-0013 的 M4c 清单）。
+若你的插件用到了不支持的同步能力，选 `trusted`（并接受"只防误用"这个事实），
+或者按 ADR-0016 / 0018 / 0019 的当前能力改用对应隔离支持：
+同步 `ctx.use` **永久**不支持（请用 `ctx.async.useService`），配置/状态栏/事件的能力边界以那些 ADR 为准。
 
 > 默认值是 `untrusted`。**如果扩展宿主没有隔离后端，`untrusted` 插件会被直接拒绝加载**
 > （fail-closed），状态面板会明确告诉你原因。开发期请在 `plugin.json` 里写 `"trust": "trusted"`。
@@ -212,5 +213,5 @@ pnpm run cli -- sign plugins/my-plugin --verify
 ```bash
 pnpm run cli -- list --root plugins     # 退出码 1 = 有问题（坏清单 / 缺提供者 / 依赖环）
 pnpm run cli -- tree --root plugins     # 依赖图是否如你所愿
-pnpm test                               # 全套 135 项
+pnpm run verify                         # 类型检查 + 测试 + 文档链接 + 构建 + 冒烟（数量以输出为准）
 ```

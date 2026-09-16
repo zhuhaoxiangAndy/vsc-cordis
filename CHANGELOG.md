@@ -65,6 +65,31 @@
 - 版本协商补齐：`tryResolve` 支持范围（版本不符不再被当成"软依赖缺失"）；
   隔离取用点复查消费者声明的范围。见 ADR-0019 决策 7。
 - pnpm 11.7 下 `allowBuilds` 未决占位导致 `pnpm install` 退出 1、`pnpm run verify` 不可运行。见 ADR-0009 决策 5。
+- **隔离子进程畸形 IPC 可终止宿主进程**：`process.send(null)` 会让 `message.kind` 抛 `TypeError`
+  进宿主事件循环（Extension Host DoS）。现在消息入口做结构校验、`#handle` 包 try/catch，
+  畸形消息只失败该会话；启动/激活阶段也会快速 reject，不再干等 readyTimeout。
+- **隔离路径下 `vscode:workspace.read` 未生效**：无权限插件也能拿到 `workspaceFolders`。
+  现在宿主侧无权限不预取、子进程侧同步拒绝。
+- **last-wins 的被替换者卸载会删掉接管者的远程路由**：路由清理现在校验代际 token，
+  只删除仍属于本次 `provide` 的条目；新增真实 IPC 回归。
+- **ServiceRegistry 旧 handle 撤销新提供者、hard 依赖边被 soft 覆盖、last-wins 后旧 owner
+  `provides` 残留**：handle 绑定 generation、hard 不降级、换人时清理旧 owner 集合。
+- **`settle()` 不是队列屏障**：单次 no-op 会排在二级级联之前，返回时仍可能 `queueDepth > 0`。
+  现在等待队列尾部，出现新任务就继续等，直到真正排空。
+- **`EffectStack` 并发 `dispose()` / draining 期间 `add()` 破坏严格串行 LIFO**：
+  并发 dispose 复用同一条回收链；draining 期间新增/提前 dispose 的项回到队列按 LIFO 执行。
+- **热重载改 `plugin.json#id` 留下旧 incarnation 与幽灵命令**：同目录 id 变化时先卸载旧 id，
+  再加载新 id，并重建 `dir → id` 映射（避免目录改名后误卸载活插件）。
+- **隔离子进程激活后异常退出，`PluginHost` 仍显示 active**：loader 通过 `onUnexpectedExit`
+  上报，`PluginHost.reportExternalFailure()` 走串行队列转 `failed` 并回收宿主侧副作用。
+- **热重载计划未串行化**：debounce 窗口外的多个 plan 现在排队处理，`Runtime.dispose()`
+  会先等已排队的计划跑完再拆宿主。
+- **服务没有信任级隔离**：保留 ADR-0019 的跨 trust `last-wins` 能力，但发生
+  “untrusted 接管同进程服务”时写显式 warning，并新增 ADR-0022 声明消费者应使用
+  `exclusive` 或自行校验 owner/version。
+- 文档更正：ADR-0005 如实记录 `net` 拦截可被 `process.getBuiltinModule()` / 动态 `import()` /
+  全局 `fetch` 绕过，并说明 `fs:read` 在隔离下不扩大边界；清理 M1/M2“留待后续”过时表、
+  signing/README 的隔离与版本表述、README 体积/配置表漂移。
 
 ### 测试
 

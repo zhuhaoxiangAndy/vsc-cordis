@@ -2,23 +2,23 @@
 
 自动化测试覆盖了 kernel 与加载器；桥接层的**逻辑**（权限门、命令表记账、副作用回收、
 只读配置视图、事件订阅）已由 `packages/host/test/bridge.spec.ts` 用 `vscode` stub 做契约测试，
-但**真实宿主里的行为**（尤其是 `--permission` 是否可用）仍需要真实的 `vscode` 模块 ——
-只能靠下面的手动步骤覆盖。本项目按用户决策不跑 `@vscode/test-electron` e2e。
+但**真实宿主里的行为**仍需真实 `vscode` 模块 —— 只能靠下面的手动步骤覆盖。
+`--permission` 已在 Electron-as-Node 下预验证可用，但真实 Extension Host(F5) 仍未验收。
+本项目按用户决策不跑 `@vscode/test-electron` e2e。
 
 ## 准备
 
 ```bash
-npm install      # 或 pnpm install
-npm test         # 58 项自动化测试
-npm run build    # 构建 3 个插件 + Node 宿主 + Web 宿主
-node scripts/smoke-built-plugins.mjs   # 产物契约冒烟
+pnpm install
+pnpm run verify    # 类型检查 + 全部测试 + 文档链接 + 构建 + 冒烟（数量以输出为准）
 ```
 
 然后在 VSCode 中打开本仓库，按 **F5**（配置名：`运行 vscordis 扩展（M1/M2 手动验收）`）。
 `.vscode/settings.json` 已经把 `vscordis.pluginRoots` 指向 `${workspaceFolder}/plugins`。
 
-先按 `Ctrl+Shift+P` → `VSCordis: 显示运行时状态`，应该看到 3 个插件全部 `active`：
-`hello`、`provider-clock`、`consumer-greeting`，且服务表里有 `clock ← provider-clock@1.0.0#1`。
+先按 `Ctrl+Shift+P` → `VSCordis: 显示运行时状态`，应该看到 4 个插件全部 `active`：
+`hello`、`provider-clock`、`consumer-greeting`、`isolated-hello`，且服务表里有
+`clock ← provider-clock@1.0.0#1`。
 
 ---
 
@@ -66,13 +66,15 @@ node scripts/smoke-built-plugins.mjs   # 产物契约冒烟
 
 ---
 
-## M1/M2 未覆盖、留待后续里程碑的部分
+## 历史记录：这些里程碑后来都交付了
 
-| 项 | 里程碑 | 说明 |
-| --- | --- | --- |
-| 文件监听自动热重载（<1s） | M3 | 当前 `reload` 是手动命令；`NodeModuleLoader` 已具备"重载拿到新模块"的能力（有单测） |
-| 子进程隔离后端 | M4 | `trust: untrusted` 的插件**现在会被拒绝加载**（fail-closed，ADR-0003） |
-| 签名与哈希校验 | M4 | `plugin.json` 的 `integrity` / `signature` 字段尚未读取；密钥脚本见 ADR-0008 |
-| 首次安装的权限确认 UI | M4 | 当前权限来自清单，越权调用抛 `PermissionDeniedError` |
-| Web 宿主运行期验证 | — | 只验证了"能构建成不依赖 Node 内建的 ESM"；浏览器端未实测（ADR-0006） |
-| CLI（创建插件/依赖图可视化） | M5 | `vscordis showStatus` 已能打印依赖图文本，CLI 尚未开工 |
+本节在 M1/M2 时点列的是"留待后续"；现在全部已交付，保留此段只为避免旧读者误解：
+
+- M3 文件监听/热重载：ADR-0011，步骤见 `docs/acceptance-m3.md`；
+- M4a 完整性与签名：ADR-0012，见 `docs/signing.md`；
+- M4b 子进程隔离（有后端才允许 `untrusted`；无后端/Web fail-closed）：ADR-0013/0016/0019；
+- 首次安装的权限确认仍采用"清单声明 + 越权 `PermissionDeniedError`"——这不是待办，是设计；
+- Web 宿主按 ADR-0006 的能力矩阵降级，浏览器端 F5 验证仍需用户侧完成；
+- CLI 已在 M5 交付：`vscordis tree|list|doctor`（ADR-0014）。
+
+当前能力以 README 能力矩阵与 `docs/adr/README.md` 为准。

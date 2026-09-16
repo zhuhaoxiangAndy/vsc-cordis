@@ -11,7 +11,7 @@
 ```
 进度：M1（PoC）✅   M2（依赖协调）✅   M3（热重载）✅   M4a（完整性/签名）✅   M4b（子进程隔离）✅   M5（CLI）✅
 
-全部五个里程碑已交付。**但 M1–M4b 的真实验收仍需你在真 VSCode 里按 F5 走一遍**
+全部**六个**里程碑（M1–M5，含 M4a/M4b）已交付。**但 M1–M4b 的真实验收仍需你在真 VSCode 里按 F5 走一遍**
 （三份步骤表见 `docs/acceptance-*.md`）—— 自动化测试覆盖了 kernel、加载器、watcher、完整性与隔离，
 唯独桥接层与真实 Electron 行为只能手动确认。
 ```
@@ -45,13 +45,14 @@ pnpm run watch                     # 终端 A：esbuild 监听插件源码 → �
 # 终端 B / VSCode：按 F5 启动扩展开发宿主
 ```
 
-改 `plugins/*/src/**` 保存后，宿主会在 **~250ms** 内自动卸载并重载该插件
-（时延预算分解与实测方法见 `docs/acceptance-m3.md`）。
+改 `plugins/*/src/**` 保存后，宿主会触发一次增量重建 + 自动卸载/重载；具体时延
+以真实 F5 实测为准，预算分解与测量方法见 `docs/acceptance-m3.md`。
 
 `Ctrl+Shift+P` 输入 `VSCordis` 可见 6 个入口命令。
 
 **手动验收**：先走 `docs/acceptance-quick.md`（≈10 分钟主线，串起命令生命周期、依赖级联、
-隔离子进程、显式异步面与热重载，含 `vscordis.isolation.permissionModel` 未实测项的逃生开关）。
+隔离子进程、显式异步面与热重载，含 `vscordis.isolation.permissionModel` 的逃生开关与
+“Electron-as-Node 已预验证、真实 Extension Host 待 F5”范围声明）。
 需要细节时再看 `docs/acceptance-m1-m2.md` / `acceptance-m3.md` / `acceptance-m4b.md`。
 
 ## 打包（本地 VSIX）
@@ -70,7 +71,8 @@ code --install-extension vscordis-local.vsix    # 装进你自己的 VSCode
 `keys/*.pub.pem`、`package.json` 都在，且源码 / 测试 / `node_modules` / sourcemap 都不在。
 刻意不去自己实现一遍 ignore 语义再断言 —— 那只证明"我的实现和我的理解一致"。
 
-生产构建的 VSIX 约 **34 KB**（开发构建约 209 KB，差在 sourcemap 与压缩）。
+生产构建的 VSIX 体积以 `pnpm run verify:release` / `pnpm run verify:package` 的输出为准；
+开发构建因内联 sourcemap 会明显更大。
 `packages/host/.vscodeignore` 的取舍写在文件注释里。
 
 > 打包时会提示 `LICENSE ... not found`。这是 vsce 为**发布到市场**做的检查，
@@ -165,11 +167,13 @@ vscordis 依赖图：4 个插件，1 个服务
 
 | 设置 | 默认 | 作用 |
 | --- | --- | --- |
+| `vscordis.pluginRoots` | `[]` | 额外的插件搜索根（支持 `${workspaceFolder}`；工作区 `.vscordis/plugins` 与 globalStorage 自动搜索） |
+| `vscordis.autoLoad` | true | 宿主启动后自动加载发现到的插件 |
 | `vscordis.disposeTimeoutMs` | 2000 | 单个副作用回收的超时；超时记错误但继续回收 |
 | `vscordis.disposeBudgetMs` | 30000 | **单个插件**整栈回收的总预算；超出后剩余 teardown 跳过并逐项记日志（ADR-0015）。设为 `0` 关闭 |
 | `vscordis.activationTimeoutMs` | 15000 | `activate()` 的时限（活性保护：串行队列下没有它会被一个挂死的插件永久卡住，ADR-0015） |
 | `vscordis.hotReload` / `vscordis.hotReloadDebounceMs` | true / 150 | 文件监听热重载开关与防抖窗口（ADR-0011） |
-| `vscordis.isolation.permissionModel` | true | untrusted 插件是否启用 Node 权限模型；**这是隔离方案里唯一未在真实 VSCode 实测过的假设**，降级后果见 `docs/acceptance-m4b.md` |
+| `vscordis.isolation.permissionModel` | true | untrusted 插件是否启用 Node 权限模型。**Electron-as-Node 已预验证可用**（VSCode 1.118.1 / Electron 39.8.8 / Node 22.22.1），但真实 Extension Host(F5) 仍未验收；旧 VSCode 自带 Node <22.13 时必须设为 `false`（隔离降级为约定，见 ADR-0013/0005） |
 | `vscordis.isolation.inheritEnv` | false | 隔离子进程是否继承宿主完整环境变量；默认只传系统白名单，避免把 token/代理凭据/agent socket 暴露给 untrusted 插件（ADR-0021）。仅在插件确实需要自定义 env 时开启 |
 
 ## 能力矩阵（诚实版）
@@ -192,11 +196,14 @@ vscordis 依赖图：4 个插件，1 个服务
 2. **同进程插件可以绕过受控 API**：扩展宿主把 `vscode` 模块注入给任何扩展目录下的模块，
    `trust: trusted` 的插件在安全上**只防误用、不防恶意**；真正的边界是子进程。详见 `docs/adr/0003`。
 3. **Node 权限模型没有网络开关**：`--permission` 可限制 `fs`/`child-process`/`worker`/`addons`，
-   但**无法限制 `net`**，网络只能靠 require 拦截 + 审计（M4）。详见 `docs/adr/0005`。
-4. **VSCode 官方不支持运行期卸载单个扩展**，因此卸载粒度是「扩展内部的插件」，不是扩展本身；
+   但**无法限制 `net`**；require 拦截只是防误用，且可被 `process.getBuiltinModule()` / 动态
+   `import()` / 全局 `fetch` 绕过。详见 `docs/adr/0005`。
+4. **服务没有信任级隔离**：`last-wins` 允许 `untrusted` 提供者接管同名同进程服务，消费者参数会
+   进入子进程；不接受替换的消费者应使用默认 `exclusive`，或自行校验 owner/version。详见 `docs/adr/0022`。
+5. **VSCode 官方不支持运行期卸载单个扩展**，因此卸载粒度是「扩展内部的插件」，不是扩展本身；
    宿主自身（`packages/host/**`）的改动也无法热重载，需要重载窗口。
-5. **Web 端无法运行期加载代码**，且 Web 扩展宿主里 `require` 不可用（入口必须为 ESM）。详见 `docs/adr/0006`、`0010`。
-6. **热重载失败不回滚**：新版本 `activate` 失败时插件进入 `failed` 并弹出警告，不会自动退回旧版本
+6. **Web 端无法运行期加载代码**，且 Web 扩展宿主里 `require` 不可用（入口必须为 ESM）。详见 `docs/adr/0006`、`0010`。
+7. **热重载失败不回滚**：新版本 `activate` 失败时插件进入 `failed` 并弹出警告，不会自动退回旧版本
    （回滚需要旧版本与旧状态同时保活，会让"无残留"无法断言）。详见 `docs/adr/0011`。
 
 ## 从 Cordis 继承了什么、刻意分歧了什么

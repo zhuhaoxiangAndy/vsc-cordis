@@ -23,8 +23,6 @@
 
 **加固（交付后）**
 
-- 活性保护：`activate()` 超时（默认 15s），超时后先发 `AbortSignal` 再回滚 ——
-  串行队列不会因为一个挂死的插件而永久卡住。
 - `engines.vscordis` / `engines.vscode` 改为**强制检查**：不兼容的插件连模块都不会被求值，
   且任何加载失败都会留下 `failed` 状态（以前会停在 `idle`）。
 - 隔离模式新增：按 `plugin.json#configuration` 预取的配置（含变化推送）、状态栏项，

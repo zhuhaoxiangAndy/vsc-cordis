@@ -9,13 +9,13 @@
 > （`packages/host/test/bridge.spec.ts`、`runtime.spec.ts`）；但**真实 Electron 行为**
 > —— 桥接在真实宿主里的表现、`--permission` 是否可用、真实文件监听的时延 —— 无法在
 > `node --test` 里覆盖，项目按用户决策**不跑** `@vscode/test-electron` e2e。
-> 自动化能覆盖的部分是 250+ 项测试（`pnpm run verify`；含 1 个 `--expose-gc` 严格用例按设计 skip）。
+> 自动化能覆盖的部分以 `pnpm run verify` 的输出为准（含 1 个 `--expose-gc` 严格用例按设计 skip）。
 
 ## 0. 准备（1 分钟）
 
 ```bash
 pnpm install
-pnpm run verify        # 期望：全部通过（当前 258 项 = 257 通过 + 1 个按设计 skip；数字以实际输出为准）
+pnpm run verify        # 期望：全部通过（以实际输出为准；含 1 个 --expose-gc 严格用例按设计 skip）
 ```
 
 在 VSCode 里打开本仓库，按 **F5**（`.vscode/settings.json` 已把 `vscordis.pluginRoots`
@@ -56,7 +56,7 @@ pnpm run verify        # 期望：全部通过（当前 258 项 = 257 通过 + 1
 **通过标准**：第 6 步必须是 `#2` 或更大；若仍是 `#1`，说明模块缓存没清干净。
 细节：`docs/acceptance-m1-m2.md`。
 
-## 3. 隔离子进程 + 显式异步面（3 分钟，含唯一未实测假设）
+## 3. 隔离子进程 + 显式异步面（3 分钟，含唯一待 F5 验收的假设）
 
 `isolated-hello` 跑在独立子进程里（`trust: untrusted`）。在 **`Isolated Hello`** 输出通道里观察：
 
@@ -68,10 +68,12 @@ pnpm run verify        # 期望：全部通过（当前 258 项 = 257 通过 + 1
 | 4 | 运行 `isolated-hello.greet` | 弹出「来自隔离子进程：…」（值是 `settings.json` 里的 `isolated-hello.greeting` 或默认「你好」） |
 | 5 | 卸载 `isolated-hello`，再切换编辑器/保存 | 通道**不再**出现新行；状态面板 `活跃会话 0` |
 
-### ⚠️ 唯一没在真实 VSCode 实测过的假设：`vscordis.isolation.permissionModel`
+### ⚠️ 唯一待真实 Extension Host(F5) 验收的假设：`vscordis.isolation.permissionModel`
 
-整个隔离方案里只有这一条属于"设计上成立、但没在你的 Electron 上实测过"。它由
-Node 的 `--permission` 标志支撑（限制子进程的文件系统/子进程/worker）。
+已在**本机 Electron-as-Node 模式**预验证（VSCode 1.118.1 / Electron 39.8.8 / Node 22.22.1）：
+`--permission` 被接受，越界读/写、`worker`、`child_process`、`require('vscode')` 均得到
+`ERR_ACCESS_DENIED`；真实 `isolation.spec.ts` 在该运行时下全绿（以 `pnpm run verify` 输出为准）。
+**但这不等价于真实 Extension Host**：F5 步骤仍是唯一验收依据。
 
 - 若第 0 步状态面板显示「隔离子进程：**不可用**」，或 `isolated-hello` 加载报
   `Access to this API has been restricted` 之外、看起来与权限模型有关的错误：

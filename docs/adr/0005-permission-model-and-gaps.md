@@ -16,7 +16,11 @@ Node.js 权限模型（`doc/api/permissions.md`）：
   `fs` 仍受父进程 `--allow-fs-read` 约束。文档 §"does not inherit to a worker thread"
   与实测存在冲突，因此**不依赖 worker 继承语义**做安全推断。
 
-VSCode 侧：stable 1.107.1 的 Electron 39 内置 Node 22.21.1（≥22.13），故子进程可用 `--permission`。
+VSCode 侧：本机实测 VSCode 1.118.1 / Electron 39.8.8 内置 Node 22.22.1（≥22.13），
+`--permission` 被接受，且真实 `isolation.spec.ts` 在 Electron-as-Node 下全绿（以
+`pnpm run verify` 输出为准）；但真实 Extension Host（F5）仍未验收 —— 不能拿
+“Electron-as-Node 通过”替代。旧 VSCode 若自带 Node <22.13，必须显式设置
+`vscordis.isolation.permissionModel=false`（隔离降级为约定，见 ADR-0013）。
 
 ## 决策
 
@@ -42,10 +46,14 @@ VSCode 侧：stable 1.107.1 的 Electron 39 内置 Node 22.21.1（≥22.13），
 
 - `net` **无法**由 Node 权限模型限制。因此 `net` 权限的实现只是
   「插件进程内拦截 `require('net'|'http'|'https'|'dgram'|'tls'|'dns')` + 审计」，
-  这是**防误用**，不是强制封禁。真正的强制需要 OS 级隔离（Windows AppContainer / Linux seccomp+bubblewrap），
+  这是**防误用**，不是强制封禁。已实测的绕过路径至少有：`process.getBuiltinModule('net')`、
+  动态 `await import('node:net')`，以及 Node 22 的全局 `fetch`（不经过 `Module._load`）。
+  真正的强制需要 OS 级隔离（Windows AppContainer / Linux seccomp+bubblewrap），
   列为后续工作，不在本轮范围。
 - `fs:*` 可以由 `--permission --allow-fs-read/--allow-fs-write` 强制，但需要精确的路径列表；
-  子进程后端必须为其自身的引导脚本授予读权限。
+  子进程后端必须为其自身的引导脚本授予读权限。隔离模式下 `pluginRoot` **恒被放行**（否则
+  `main` 都加载不了），因此 `fs:read` 声明**不扩大**插件可读范围：真正的边界是“插件根内 vs
+  根外”。授予更细的根外路径属于后续能力，不在本轮范围。
 - 在 `trust: trusted`（同进程）下，权限只是**代码层面的约定**，不具备对抗性。
 
 ## 后果

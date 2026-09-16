@@ -143,7 +143,7 @@ idle ──load──► loading ──► active ⇄ paused
 | `host/discovery.ts` | 宿主启动、CLI（**相对导入**，见 ADR-0014 决策 3） |
 | `host/integrity.ts` | 宿主加载器、`scripts/sign-plugin.mjs`、CLI 的 `sign`、以及测试 |
 | `kernel/effect-stack.ts` | in-process 插件、隔离子进程里的插件 |
-| `kernel/graph.ts`（在 cli 包） | CLI 的 tree/list；纯函数无 IO |
+| `packages/cli/src/graph.ts` | CLI 的 tree/list；纯函数无 IO |
 
 ## 7. 贡献者地图：想改 X 就去 Y
 

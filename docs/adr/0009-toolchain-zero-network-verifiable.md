@@ -10,7 +10,8 @@
 ## 决策
 
 1. **测试框架用 Node 内置 `node:test` + `node:assert/strict`**，直接执行 `.ts` 文件
-   （Node ≥ 22.13 原生类型剥离；本机 Node v24.12.0）。
+   （Node ≥ 22.18 原生类型剥离，且桥接 stub 需要的 `module.registerHooks` 已可用；
+   本机 Node v24.12.0）。
    - 理由：零依赖 → 无网络也能跑；`kernel` 是纯状态机，不需要 snapshot/mock 设施。
    - 代价：没有 Vitest 的 `expect` 语法糖与 watch UI。可接受。
    - Vitest 保留为可选升级路径，不进本轮依赖。

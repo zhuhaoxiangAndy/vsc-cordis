@@ -40,6 +40,7 @@
 | [0019](./0019-cross-process-services.md) | 跨进程服务 —— 远程标记、方法表、以及"同步入口必须拒绝" | 已接受 |
 | [0020](./0020-reparse-point-hardening.md) | 隔离前的 reparse point 校验 —— 链接不得逃出插件根 | 已接受（交付后安全加固轮） |
 | [0021](./0021-child-env-allowlist.md) | 隔离子进程的环境变量默认白名单 | 已接受（交付后安全加固轮） |
+| [0022](./0022-service-trust-boundary.md) | 服务没有信任级隔离（last-wins 可跨 trust 接管） | 已接受（交付后安全加固轮） |
 
 ## 按主题找
 
@@ -47,7 +48,7 @@
 | --- | --- |
 | 分层与内核语义 | [0001](./0001-architecture-baseline.md)、[0004](./0004-effect-stack-semantics.md)、[0007](./0007-dependency-resolution-and-cascade.md)、[0015](./0015-liveness-and-residue-evidence.md)、[0017](./0017-engines-must-be-enforced.md) |
 | 宿主、命令与热重载 | [0002](./0002-command-palette-and-unload-verification.md)、[0010](./0010-host-layer-decisions.md)、[0011](./0011-hot-reload.md) |
-| 隔离与安全 | [0003](./0003-isolation-tiers-fail-closed.md)、[0005](./0005-permission-model-and-gaps.md)、[0006](./0006-web-host-degradation.md)、[0008](./0008-secret-management.md)、[0012](./0012-integrity-and-signing.md)、[0013](./0013-isolation-backend.md)、[0016](./0016-isolation-capability-tradeoffs.md)、[0018](./0018-explicit-async-surface.md)、[0019](./0019-cross-process-services.md)、[0020](./0020-reparse-point-hardening.md)、[0021](./0021-child-env-allowlist.md) |
+| 隔离与安全 | [0003](./0003-isolation-tiers-fail-closed.md)、[0005](./0005-permission-model-and-gaps.md)、[0006](./0006-web-host-degradation.md)、[0008](./0008-secret-management.md)、[0012](./0012-integrity-and-signing.md)、[0013](./0013-isolation-backend.md)、[0016](./0016-isolation-capability-tradeoffs.md)、[0018](./0018-explicit-async-surface.md)、[0019](./0019-cross-process-services.md)、[0020](./0020-reparse-point-hardening.md)、[0021](./0021-child-env-allowlist.md)、[0022](./0022-service-trust-boundary.md) |
 | 工具链与 CLI | [0009](./0009-toolchain-zero-network-verifiable.md)、[0014](./0014-cli-and-provides.md) |
 
 ## 相关文档

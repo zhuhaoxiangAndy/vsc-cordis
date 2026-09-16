@@ -32,6 +32,7 @@
 | `vscordis.hotReload` | `true` | 监听插件目录变化并自动重载 |
 | `vscordis.hotReloadDebounceMs` | `150` | 文件变化防抖窗口 |
 | `vscordis.disposeTimeoutMs` | `2000` | 单个副作用回收的超时 |
+| `vscordis.disposeBudgetMs` | `30000` | 单个插件整栈回收总预算；超出后剩余 teardown 跳过并记日志（ADR-0015） |
 | `vscordis.activationTimeoutMs` | `15000` | 插件 `activate()` 的时限（没有它，一个挂死的插件会冻结整个宿主） |
 | `vscordis.isolation.permissionModel` | `true` | 对 `untrusted` 插件使用 Node 权限模型（`--permission`） |
 | `vscordis.isolation.inheritEnv` | `false` | 隔离子进程是否继承宿主完整环境变量；默认只传系统白名单（ADR-0021） |

@@ -95,10 +95,17 @@ ADR-0003 定下三级模型：`trusted` 走同进程（只防误用），`untrus
 
 ## 未验证 / 已知缺口
 
-1. **真实 VSCode（Electron）中的 `--permission` 未验证**。本机测试跑在 Node 24.12 上，
-   VSCode 1.107 的 Electron 39 内置 Node 22.21（≥22.13，理论上支持）。
-   为此提供 `vscordis.isolation.permissionModel` 逃生开关 —— 但关掉它必须明白强度会降级。
-   `fork` 时统一设置 `ELECTRON_RUN_AS_NODE=1`，避免 Electron 下去启动一个完整应用。
+1. **真实 VSCode Extension Host 中的 `--permission` 仍未 F5 验收**。已用本机
+   VSCode 1.118.1 / Electron 39.8.8 / Node 22.22.1 的 Electron-as-Node 模式预验证：
+   `--permission` 被接受，越界读/写/worker/child-process/`vscode` 导入均被拦，
+   `isolation.spec.ts` 全绿（以 `pnpm run verify` 输出为准）。这**不等价于**真实
+   Extension Host；逃生开关 `vscordis.isolation.permissionModel` 仍然保留。
+   旧 VSCode 若自带 Node <22.13，必须显式关闭该开关（隔离降级为约定）。
 2. **`--permission` + `silent: true` 的 stderr 会带上 SecurityWarning**，目前原样转到日志，未做过滤。
-3. 隔离插件**不能参与服务依赖**（决策 5），因此它们不进入 `ServiceRegistry` 的依赖图。
-4. 生命周期里没有"插件主动重启子进程"的路径：崩溃 = 插件 `failed`，需手动 reload。
+3. 隔离插件**不能参与服务依赖**这条已被 ADR-0019 部分取代：`ctx.async.useService` 可消费
+   `remote` 服务；同步 `ctx.use` 仍被拒绝。决策 5 的"明确不支持"表是 M4b 历史边界，
+   当前能力以 ADR-0016 / 0018 / 0019 为准。
+4. 生命周期里没有"插件主动重启子进程"的路径：崩溃 = 插件 `failed`，需手动 reload；
+   崩溃后宿主状态可见性由 ADR-0019 决策 10 与后续"外部失败上报"接线保证。
+5. reparse point 越界由 ADR-0020 在 fork 前拒绝；宿主 env 暴露面由 ADR-0021 默认白名单收敛；
+   服务没有信任级隔离由 ADR-0022 明确声明。

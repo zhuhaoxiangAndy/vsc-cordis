@@ -398,8 +398,9 @@ export async function runCreate(
   if (trust === 'untrusted') {
     ctx.out('')
     ctx.out('注意：该插件声明为 untrusted，会运行在**独立子进程**里。')
-    ctx.out('      隔离模式下不能用 ctx.use / ctx.provide，也不支持 createStatusBarItem /')
-    ctx.out('      getConfiguration / onDidSaveTextDocument（见 docs/acceptance-m4b.md）。')
+    ctx.out('      同步 ctx.use 会被拒绝（请改用 ctx.async.useService）；ctx.provide、状态栏项、')
+    ctx.out('      getConfiguration、保存/活动编辑器事件在隔离模式下有对应支持或显式异步面。')
+    ctx.out('      细节见 docs/plugin-authoring.md 与 docs/adr/0019。')
   }
   return 0
 }

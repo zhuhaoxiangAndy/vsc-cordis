@@ -293,6 +293,15 @@ export class IsolatedPluginLoader {
     methods: readonly string[],
     conflict: 'exclusive' | 'last-wins',
   ): Disposable {
+    const existing = this.#options.registry.providerInfo(name)
+    if (conflict === 'last-wins' && existing !== undefined && !existing.remote) {
+      // 服务名是全局能力，没有信任级隔离：untrusted 提供者可以接管同进程提供者，
+      // 消费者参数/返回值会进入隔离子进程。保留能力（ADR-0019 决策 8），但不能静默。
+      this.#log(
+        `[${pluginId}] untrusted 插件以 last-wins 接管同进程服务 "${name}"（原提供者 ${existing.owner}）：` +
+          '消费者参数/返回值会进入隔离子进程；服务没有信任级隔离（ADR-0022）。',
+      )
+    }
     const token = ++this.#serviceTokenSeq
     const instance = createRemoteServiceInstance(name, methods, (method, args) =>
       this.#invokeRemote(name, method, args, token),
