@@ -56,6 +56,12 @@ const eventListeners = new Map<number, (payload: SerializedSaveEvent | undefined
  * 与命令 handler 走的是同一套"函数不跨进程，只跨调用"的思路（ADR-0019）。
  */
 const localServices = new Map<string, unknown>()
+/**
+ * 服务名 → 本地 provide 代际。同名重复 `ctx.provide` 时，旧 handle 的 dispose 不能
+ * revoke 新提供者（宿主侧 registry 只能看到服务名，无法区分是哪一代）。
+ */
+const localServiceGenerations = new Map<string, number>()
+let localServiceSeq = 0
 let callSeq = 0
 
 /** 列出服务的方法名。这份"IDL-lite"让消费者的代理能对**不存在的方法**响亮报错。 */
@@ -739,8 +745,14 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
         ]),
         `提供服务 ${name}`,
       )
+      const generation = ++localServiceSeq
+      localServiceGenerations.set(name, generation)
       localServices.set(name, service)
       const disposable = new LocalDisposable(() => {
+        // 同名已被更新的 provide 取代：旧 handle 的 dispose 是 no-op，
+        // 否则会把宿主注册表里的新提供者一起 revoke 掉。
+        if (localServiceGenerations.get(name) !== generation) return
+        localServiceGenerations.delete(name)
         localServices.delete(name)
         void callHost('services.revoke', [name]).catch(() => undefined)
       })

@@ -78,6 +78,9 @@
   `provides` 残留**：handle 绑定 generation、hard 不降级、换人时清理旧 owner 集合。
   `depend` 进一步改为**按 kind 引用计数**：提前 dispose 一个 edge 不再误删另一条
   （soft 撤销后 hard 仍在；hard 撤销后 soft 仍在，只是不再参与级联）。
+- **隔离子进程同名重复 `provide` 的旧 handle dispose 会 revoke 新提供者**：
+  子进程侧按代际计数，过期 handle 的 revoke 是 no-op；否则宿主注册表只看到服务名，
+  无法区分是哪一代，旧 handle 会把新提供者一起撤销。
 - **`settle()` 不是队列屏障**：单次 no-op 会排在二级级联之前，返回时仍可能 `queueDepth > 0`。
   现在等待队列尾部，出现新任务就继续等，直到真正排空。
 - **`EffectStack` 并发 `dispose()` / draining 期间 `add()` 破坏严格串行 LIFO**：

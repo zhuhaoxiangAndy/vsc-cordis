@@ -1452,6 +1452,50 @@ test('ADR-0019：被 last-wins 替换者卸载，不能删掉接管者的远程�
   }
 })
 
+test('ADR-0019：隔离子进程同名重复 provide，旧 handle dispose 不能撤销新提供者', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture(
+    'svc-reprovide',
+    `module.exports = {
+       activate(ctx) {
+         const first = ctx.provide('greeting', { hello: () => 'from-first' }, { version: '1.0.0' })
+         ctx.provide('greeting', { hello: () => 'from-second' }, { version: '1.0.0' })
+         first.dispose()
+       },
+     }\n`,
+  )
+  const consumer = await makeFixture(
+    'svc-reprovide-consumer',
+    `module.exports = {
+       activate: async (ctx) => {
+         const greeting = await ctx.async.useService('greeting')
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('svc.reprovide', async () => await greeting.hello()),
+           (d) => d.dispose(),
+           'cmd:svc.reprovide',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.load(consumer)
+    await host.settle()
+    assert.equal(
+      await hostApi.executeCommand('svc-reprovide-consumer', 'svc.reprovide', []),
+      'from-second',
+      '旧 handle 的 dispose 不能把宿主注册表里的新提供者一起 revoke',
+    )
+    assert.equal(host.registry.providerInfo('greeting')?.owner, 'svc-reprovide')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
 test('ADR-0019：隔离插件也不能自设 provide 的 remote 标记（响亮失败）', async () => {
   const hostApi = new FakeHostApi()
   const liar = await makeFixture(
