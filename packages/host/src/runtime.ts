@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { PluginHost, describe, type PluginEntry, type PluginView } from '@vscordis/kernel'
@@ -9,6 +9,8 @@ import { PluginWatcher, type ReloadPlan } from './watcher.ts'
 
 export interface RuntimeOptions {
   readonly output: vscode.LogOutputChannel
+  /** 宿主扩展自身目录：用于定位内置验签公钥 `keys/vscordis-ed25519.pub.pem`。 */
+  readonly extensionUri: vscode.Uri
   /** 用于解析 `${workspaceFolder}` 与默认插件根目录。 */
   readonly globalStorageUri: vscode.Uri
   readonly supportsIsolation?: boolean
@@ -24,6 +26,8 @@ export class Runtime {
   readonly bridge: VscodeBridge
   readonly host: PluginHost
   readonly #globalStorageUri: vscode.Uri
+  readonly #extensionUri: vscode.Uri
+  readonly #publicKeyPem: string | undefined
   readonly #watcher: PluginWatcher
   /** 规范化目录 → 插件 id。热重载要靠目录反查 id；目录被删除时也靠它决定卸载谁。 */
   readonly #dirToId = new Map<string, string>()
@@ -34,8 +38,17 @@ export class Runtime {
 
   constructor(options: RuntimeOptions) {
     this.#globalStorageUri = options.globalStorageUri
+    this.#extensionUri = options.extensionUri
+    this.#publicKeyPem = readPublicKey(options.extensionUri)
+
     const loader = new NodeModuleLoader({
       onLog: (message) => this.bridge.log('trace', message),
+      integrity: {
+        publicKeyPem: this.#publicKeyPem,
+        // 用户决策：开发期（工作区目录）可未签名；装入 globalStorage 的插件必须签名 + 哈希。
+        // 注意这是"是否强制"的开关，不是"是否校验"的开关 —— 带签名的插件在任何来源下都会被校验。
+        requireSignature: (entry) => entry.source === 'global',
+      },
     })
     this.bridge = new VscodeBridge({
       platform: 'node',
@@ -197,6 +210,13 @@ export class Runtime {
 
     // 即使关掉自动加载，热重载也要开：手动加载过的插件同样应该享受改动即生效。
     this.#startWatching()
+    if (this.#publicKeyPem === undefined) {
+      this.bridge.log(
+        'warn',
+        '未找到验签公钥 packages/host/keys/vscordis-ed25519.pub.pem：带签名的插件会被拒绝，' +
+          'globalStorage 插件将无法加载（生成方式见 docs/signing.md）',
+      )
+    }
     this.bridge.log('info', `启动完成：${this.host.list().length} 个插件，${this.bridge.livePluginCommands().length} 个命令`)
   }
 
@@ -300,6 +320,10 @@ export class Runtime {
     const lines: string[] = []
     lines.push(`VSCordis 运行时状态（${new Date().toISOString()}）`)
     lines.push(`平台：node · 隔离后端：${this.bridge.supportsIsolation ? '可用' : '不可用（untrusted 插件会被拒绝）'}`)
+    lines.push(
+      `完整性校验：${this.#publicKeyPem === undefined ? '⚠ 未配置验签公钥（带签名的插件会被拒绝）' : '已配置验签公钥'}` +
+        ' · globalStorage 插件必须签名（docs/signing.md）',
+    )
     const hotReload = vscode.workspace.getConfiguration('vscordis').get<boolean>('hotReload', true)
     const lastReload =
       this.#lastReloadAt === undefined
@@ -377,6 +401,22 @@ export class Runtime {
 function normalizeDir(dir: string): string {
   const resolved = path.resolve(dir)
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+/**
+ * 读取内置验签公钥。
+ *
+ * 找不到时返回 undefined —— 此时**任何带签名的插件都会被拒绝**（fail-closed，ADR-0012 决策 4）。
+ * 刻意不选择"没公钥就当作未签名放行"：那样攻击者只需删掉公钥文件就能降级整套机制。
+ */
+function readPublicKey(extensionUri: vscode.Uri): string | undefined {
+  const keyPath = path.join(extensionUri.fsPath, 'keys', 'vscordis-ed25519.pub.pem')
+  try {
+    const value = readFileSync(keyPath, 'utf8')
+    return value.trim().length === 0 ? undefined : value
+  } catch {
+    return undefined
+  }
 }
 
 function readHotReloadDebounceMs(): number {

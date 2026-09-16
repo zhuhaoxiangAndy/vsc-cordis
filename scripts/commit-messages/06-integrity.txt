@@ -1,0 +1,40 @@
+feat(host): M4a 完整性与签名校验链路
+
+新增
+- packages/host/src/integrity.ts：canonicalJson（递归按 key 排序）、sha256、Ed25519 验签、
+  signPluginDirectory。签名脚本与校验器**共用同一份实现**，避免"各写一套"的经典漂移。
+- packages/host/src/paths.ts：把路径安全工具独立出来，避免 integrity → loader → integrity 的循环导入。
+- scripts/gen-key.mjs：生成 Ed25519 密钥对。私钥默认写到 %USERPROFILE%\.dsh\keys\（**仓库之外**），
+  公钥写到 packages/host/keys/（应入库）。覆盖已有密钥必须显式 --force。
+- scripts/sign-plugin.mjs：签名插件；--verify 立刻用仓库公钥回验
+  （专门抓"换了私钥但忘了更新公钥"——此时签名看着成功，实际谁也验不过）。
+- docs/signing.md：操作手册 + 错误对照表。docs/adr/0012：策略与语义。
+
+策略（依用户决策）
+- 工作区插件：签名可选；但**若存在签名仍严格校验**（不允许"签了但签错"被放行）。
+- globalStorage 插件：必须签名；缺 plugin.sig 直接拒绝，错误信息附文档链接。
+- 带签名但宿主没有公钥 → 拒绝（fail-closed）：否则攻击者删掉公钥文件就能降级整套机制。
+- 校验发生在 require **之前** —— 放在之后等于没校验（恶意代码已被求值）。
+
+两条防线各司其职
+- 只有 integrity 时：能发现产物被换，但攻击者可以同步改写 integrity.hash（哈希谁都会算）。
+- 加上签名后：改写清单就会破坏签名。测试「篡改产物并同步改写 integrity.hash」专门验证这条链路。
+
+过程中发现并修掉的真实问题
+- 测试的默认参数陷阱：verify(dir, false, undefined) 会回退到默认公钥，
+  导致"宿主未配置公钥"这条路径**根本测不到**，断言假绿 → 改用 null 哨兵。
+- .gitignore 的 *.pem 把**公钥**一起忽略了：若不修，公钥永远入不了库，
+  宿主会持续报"未配置验签公钥"并拒绝所有已签名插件（典型静默失败）。
+  已加反向例外 !packages/host/keys/*.pub.pem。
+
+验证
+- typecheck 0 错误；83 项测试全绿（新增 14 项：篡改产物、篡改清单、错钥、越界、
+  integrity 结构非法、规范化负载与 key 顺序无关、策略矩阵）。
+- 真实密钥端到端跑通：gen-key → sign-plugin --verify → 模式 signed，回验通过。
+- 测试使用运行时生成的临时密钥对，私钥永不进入仓库或 CI。
+
+诚实边界（已写入 ADR-0012 与 docs/signing.md）
+- **签名不构成沙箱**：同进程插件仍可绕过受控 API（ADR-0003 有源码级证据）。
+  真正的边界是子进程隔离（M4b，当前 untrusted 仍为 fail-closed 拒绝）。
+- 无吊销机制：换密钥 = 所有旧签名失效。
+- 只签入口产物，不覆盖多文件插件的子模块（与"插件必须单文件 CJS"约束自洽）。

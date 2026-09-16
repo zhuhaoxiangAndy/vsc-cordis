@@ -9,7 +9,7 @@
 - **不修改 VSCode 源码，不使用非公开 API。** 宿主本身是一个普通 VSCode 扩展。
 
 ```
-进度：M1（PoC）✅   M2（依赖协调）✅   M3（热重载）✅   M4（安全沙箱）⏳   M5（CLI）⏳
+进度：M1（PoC）✅   M2（依赖协调）✅   M3（热重载）✅   M4a（完整性/签名）✅   M4b（子进程隔离）⏳   M5（CLI）⏳
 ```
 
 ## 目录
@@ -27,7 +27,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 69 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 83 项测试 + 构建 + 产物冒烟
 ```
 
 开发时开两个进程：
@@ -42,6 +42,18 @@ pnpm run watch                     # 终端 A：esbuild 监听插件源码 → �
 
 `Ctrl+Shift+P` 输入 `VSCordis` 可见 6 个入口命令。
 
+## 签名（M4a）
+
+```bash
+pnpm run keygen                                  # 生成密钥对：私钥在仓库外，公钥在 packages/host/keys/
+pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公钥回验
+```
+
+策略：**工作区插件可未签名；装入 `globalStorage` 的插件必须签名 + 哈希**，
+且校验发生在 `require` **之前**。完整操作手册与错误对照表见 `docs/signing.md`。
+
+签名保证"这段代码就是发布者发布的那段"，**不保证**它是善意的 —— 沙箱是另一件事（M4b）。
+
 ## 能力矩阵（诚实版）
 
 | 能力 | Desktop / Remote 宿主 | Web 宿主 (vscode.dev) |
@@ -50,8 +62,8 @@ pnpm run watch                     # 终端 A：esbuild 监听插件源码 → �
 | 运行期加载磁盘上的插件 | ✅ | ❌ 浏览器无法运行期加载代码，仅支持**构建期内置**插件 |
 | 文件监听自动热重载 | ✅（`npm run watch` + `vscordis.hotReload`） | 不适用 |
 | 手动 reload（拿到新模块实例） | ✅ | ✅（内置插件重新取工厂产物） |
-| 子进程隔离（untrusted） | ⏳ M4 | ❌ 直接拒绝加载（fail-closed） |
-| 签名与哈希校验 | ⏳ M4 | ⏳ M4 |
+| 子进程隔离（untrusted） | ⏳ M4b | ❌ 直接拒绝加载（fail-closed） |
+| 签名与哈希校验 | ✅ M4a（`docs/signing.md`） | ✅ 同一实现（平台无关） |
 
 ## 已知硬限制（均有 ADR 与一手证据）
 

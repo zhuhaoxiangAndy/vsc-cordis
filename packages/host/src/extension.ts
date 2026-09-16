@@ -16,6 +16,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   runtime = new Runtime({
     output,
+    extensionUri: context.extensionUri,
     globalStorageUri: context.globalStorageUri,
   })
 
