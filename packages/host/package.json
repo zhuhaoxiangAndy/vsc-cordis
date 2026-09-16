@@ -55,6 +55,11 @@
           "type": "number",
           "default": 150,
           "description": "文件变化防抖窗口（毫秒）。esbuild 一次增量重建可能触发多个事件，聚合后再重载。"
+        },
+        "vscordis.isolation.permissionModel": {
+          "type": "boolean",
+          "default": true,
+          "description": "对 untrusted 插件使用 Node 权限模型（--permission）。关闭后文件系统与子进程不再被强制拦截，隔离强度降级为「无 vscode 模块 + 受控 RPC」——仅在当前 VSCode/Electron 组合不支持该标志时才关闭（见 ADR-0013）。"
         }
       }
     }

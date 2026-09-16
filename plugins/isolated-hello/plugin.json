@@ -1,0 +1,13 @@
+{
+  "id": "isolated-hello",
+  "name": "Isolated Hello (M4b)",
+  "version": "1.0.0",
+  "description": "声明 trust: untrusted，运行在独立子进程中：无 vscode 模块、fs 被 Node 权限模型限制、命令 handler 走反向 RPC",
+  "main": "dist/index.cjs",
+  "trust": "untrusted",
+  "permissions": [
+    "vscode:commands.register",
+    "vscode:window.messages",
+    "vscode:window.output"
+  ]
+}

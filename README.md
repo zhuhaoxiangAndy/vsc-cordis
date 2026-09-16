@@ -9,7 +9,7 @@
 - **不修改 VSCode 源码，不使用非公开 API。** 宿主本身是一个普通 VSCode 扩展。
 
 ```
-进度：M1（PoC）✅   M2（依赖协调）✅   M3（热重载）✅   M4a（完整性/签名）✅   M4b（子进程隔离）⏳   M5（CLI）⏳
+进度：M1（PoC）✅   M2（依赖协调）✅   M3（热重载）✅   M4a（完整性/签名）✅   M4b（子进程隔离）✅   M5（CLI）⏳
 ```
 
 ## 目录
@@ -27,7 +27,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 83 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 93 项测试 + 构建 + 产物冒烟
 ```
 
 开发时开两个进程：
@@ -54,6 +54,23 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 
 签名保证"这段代码就是发布者发布的那段"，**不保证**它是善意的 —— 沙箱是另一件事（M4b）。
 
+## 子进程隔离（M4b）
+
+`plugin.json` 里声明 `"trust": "untrusted"` 的插件会被加载到**独立子进程**：
+
+- 子进程里**没有 `vscode` 模块**（连模块解析都被权限模型挡住）—— 这是真边界，不是约定；
+- 文件系统被 Node 权限模型限制在插件自己的目录内（越界读得到 `ERR_ACCESS_DENIED`）；
+- 命令 handler 留在子进程，宿主执行命令时**反向调用**它求值；
+- 子进程的寿命 = 宿主侧的一项 effect，卸载时 `kill` 是兜底。
+
+隔离层刻意**不 import `vscode`**（宿主能力由接口注入），因此整条链路可以用 `node --test`
+端到端验证：10 项测试跑的是**真实子进程 + 真实 IPC + 真实 `--permission`**。
+示例插件 `plugins/isolated-hello`，手动验收见 `docs/acceptance-m4b.md`。
+
+刻意收窄的边界（抛错并说明原因，不给假接口）：隔离插件**不能**用服务（`ctx.use`/`provide`）、
+**不能**用 `createStatusBarItem` / `getConfiguration` / `onDidSaveTextDocument` —— 这些留到 M4c。
+`net` 权限是**约定**而非强制（Node 没有网络开关）。详见 `docs/adr/0013-isolation-backend.md`。
+
 ## 能力矩阵（诚实版）
 
 | 能力 | Desktop / Remote 宿主 | Web 宿主 (vscode.dev) |
@@ -62,7 +79,7 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 | 运行期加载磁盘上的插件 | ✅ | ❌ 浏览器无法运行期加载代码，仅支持**构建期内置**插件 |
 | 文件监听自动热重载 | ✅（`npm run watch` + `vscordis.hotReload`） | 不适用 |
 | 手动 reload（拿到新模块实例） | ✅ | ✅（内置插件重新取工厂产物） |
-| 子进程隔离（untrusted） | ⏳ M4b | ❌ 直接拒绝加载（fail-closed） |
+| 子进程隔离（untrusted） | ✅ M4b（`docs/acceptance-m4b.md`） | ❌ 直接拒绝加载（fail-closed） |
 | 签名与哈希校验 | ✅ M4a（`docs/signing.md`） | ✅ 同一实现（平台无关） |
 
 ## 已知硬限制（均有 ADR 与一手证据）
