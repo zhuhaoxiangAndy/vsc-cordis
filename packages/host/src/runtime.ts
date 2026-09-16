@@ -115,6 +115,7 @@ export class Runtime {
           this.bridge.log('error', `标记隔离插件 ${pluginId} failed 时出错：${describe(failure)}`)
         })
       },
+      onWarning: (message) => this.bridge.log('warn', message),
       onLog: (message) => this.bridge.log('debug', message),
     })
     this.#isolatedLoader = isolatedLoader
@@ -536,9 +537,12 @@ export class Runtime {
     this.#watcher.dispose()
     // 先停监听（不再产生新 plan），再等已排队的 plan 跑完，最后才拆宿主。
     await this.#reloadQueue.catch(() => undefined)
-    await this.host.dispose()
-    // 兜底释放：正常路径下插件卸载已经清过各自资源，这里覆盖"某个会话没走完整清理"的情况。
-    this.#vscodeHostApi.dispose()
+    try {
+      await this.host.dispose()
+    } finally {
+      // 兜底释放：即使 host.dispose() 中途抛错，也不让隔离宿主资源留在表里。
+      this.#vscodeHostApi.dispose()
+    }
   }
 }
 

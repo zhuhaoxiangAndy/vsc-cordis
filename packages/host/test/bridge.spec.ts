@@ -129,6 +129,23 @@ test('bridge：没有 vscode:commands.register 权限时注册命令被拒绝（
   assert.equal(stub.state.commands.has('p.run'), false)
 })
 
+test('bridge：命令 ID 有归属校验，B 不能抢注 A 的命令', () => {
+  const bridge = makeBridge()
+  const a = createApiOn(bridge, ['vscode:commands.register'], 'plugin-a')
+  const b = createApiOn(bridge, ['vscode:commands.register'], 'plugin-b')
+
+  a.api.commands.registerCommand('shared.cmd', () => 'from-a')
+  assert.throws(
+    () => b.api.commands.registerCommand('shared.cmd', () => 'from-b'),
+    (error: unknown) => {
+      assert.ok(error instanceof PermissionDeniedError)
+      assert.match(error.permission, /vscode:commands\.register/)
+      return true
+    },
+  )
+  assert.deepEqual(bridge.livePluginCommands(), [{ command: 'shared.cmd', owner: 'plugin-a' }])
+})
+
 test('bridge：executeCommand 的权限矩阵（execute / execute.any / 仅限插件命令）', async () => {
   // 1) 没有任何 execute 权限 → 拒绝
   const denied = makeApi([])

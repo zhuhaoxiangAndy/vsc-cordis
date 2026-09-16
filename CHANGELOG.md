@@ -70,6 +70,25 @@
   畸形消息只失败该会话；启动/激活阶段也会快速 reject，不再干等 readyTimeout。
   激活后的协议违规同样走 `onUnexpectedExit` 把 `PluginHost` 记录转 `failed`，不会留下
   “进程已死但状态 active”。
+- **畸形 IPC 对象的 `toString` 仍可打崩宿主**：`process.send({ kind: 1, toString: 'not-a-function' })`
+  会让监听器里的 `describe(message)`/`String()` 抛 `TypeError`（在 try/catch 之外）。现在整个
+  message 监听器包 try/catch，并用只读 `typeof/kind` 的“永不抛”摘要替代 `String(value)`；
+  `#handleCall` 的错误回复也改用安全格式化。
+- **隔离命令 `unregisterCommand` 可跨插件越权**：B 可注销 A 的命令再抢注同名 ID；由于
+  `VscodeHostApi.dispose` 修复后 unregister 会真的调用底层 dispose，这条路径变成真实劫持。
+  现在注册遇到其它 owner 抛 `PermissionDeniedError`；注销接口携带 pluginId 并做归属校验，
+  两种模式同规则。见 ADR-0023。
+- **ADR-0020 reparse 扫描误伤 pnpm workspace 依赖链接**：`pnpm install` 后每个插件根都有
+  `node_modules/@vscordis/sdk -> packages/sdk`，一刀切拒绝会让所有 untrusted 插件加载失败。
+  现在 `node_modules/<pkg>` 目标 `package.json#name` 同名时放行；`.bin` 链接要求目标位于某个包目录内；
+  其余外部链接仍 fail-closed。见 ADR-0020 决策 8。
+- **`isInside` / reparse 扫描把 `<root>/..evil/...` 误判为 root 外**：
+  `relative.startsWith('..')` 对 `..evil` 为真；现在只拒绝 `..` 段本身（`relative === '..' ||
+  relative.startsWith('..'+sep)）。
+- **降级 warning 默认不可见**：`inheritEnv` 与“跨 trust last-wins 接管”日志此前经 `onLog`
+  落到 debug；新增 `onWarning` 出口，Runtime 接到 warn 级日志（ADR-0022 决策 3）。
+- **`onError` 观察者抛错会把 EffectStack 永久卡在 draining**：观察者异常现在被吞掉不阻断回收；
+  `#drainPromise` 异常中断会清缓存，允许下次 `dispose()` 继续回收剩余项（审计 F2）。
 - **隔离路径下 `vscode:workspace.read` 未生效**：无权限插件也能拿到 `workspaceFolders`。
   现在宿主侧无权限不预取、子进程侧同步拒绝。
 - **last-wins 的被替换者卸载会删掉接管者的远程路由**：路由清理现在校验代际 token，
@@ -106,6 +125,9 @@
 
 ### 测试
 
+- `tsconfig.check.json` 明确排除 `packages/*/test/scratch/**`：一次性审计探针不该让主门禁变红。
+- 新增 H1/H2/F1/M1/F2 回归：`toString` 畸形 IPC 不打崩宿主、命令 ID 跨插件归属、
+  pnpm workspace 依赖链接放行/无同名 package 拒绝、`..evil` 不误判、坏 `onError` 不卡回收。
 - CI 在 Node 24 上显式运行 `pnpm run test:soak:strict`（`--expose-gc` 1000 轮严格浸泡），
   避免严格证据在默认 `pnpm test` 里永远 skip；本地实测堆增长 -0.21 MB。
 - 修复 `disposeBudgetMs` 用例在 CI 上的墙钟 flake：不再断言“恰好 2 项被跳过”（慢项超时后若还剩

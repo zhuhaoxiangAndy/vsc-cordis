@@ -20,8 +20,10 @@ ADR-0019 支持跨进程服务，并允许显式 `conflict: 'last-wins'` 接管�
    ADR-0019 的跨模式接管语义与现有契约失效。宿主不把 trust 级偷偷变成服务冲突规则。
 2. **诚实声明**：服务名是**能力名，不是安全边界**。`untrusted` 提供者可以与 `trusted`
    提供者同名，并在 `last-wins` 下接管；消费者的参数/返回值会跨进子进程。
-3. **不静默**：发生“隔离提供者以 last-wins 接管同进程提供者”时，宿主必须写一条 warning，
-   带上双方 owner 与 ADR-0022 指针。诊断信息不能只活在测试里（ADR-0015 同源原则）。
+3. **不静默**：发生“隔离提供者以 last-wins 接管同进程提供者”时，宿主必须写一条 **warn 级**
+   日志，带上双方 owner 与 ADR-0022 指针。`IsolatedPluginLoader` 的 `onWarning` 被 Runtime 接到
+   `LogOutputChannel` 的 warn 级（`onLog` 仍是 debug），保证默认日志级别下可见 ——
+   诊断信息不能只活在测试里（ADR-0015 同源原则）。
 4. **消费者自保**：不接受被替换的消费者应使用默认 `exclusive`（冲突直接拒绝），或在调用前
    检查 `providerInfo()` 的 owner/version；`ctx.async.useService` 当前只返回方法表 + 代际
    token，不返回 owner，后续如需可显式扩展。

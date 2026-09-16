@@ -61,6 +61,10 @@ class FakeHostApi implements IsolatedHostApi {
     command: string,
     invoke: (args: readonly unknown[]) => Promise<unknown>,
   ): { dispose(): void } {
+    const existing = this.commands.get(command)
+    if (existing !== undefined && existing.pluginId !== pluginId) {
+      throw new Error(`命令 ID "${command}" 已被插件 "${existing.pluginId}" 注册`)
+    }
     const record = { pluginId, invoke }
     this.commands.set(command, record)
     return {
@@ -70,8 +74,9 @@ class FakeHostApi implements IsolatedHostApi {
     }
   }
 
-  unregisterCommand(command: string): void {
-    this.commands.delete(command)
+  unregisterCommand(pluginId: string, command: string): void {
+    const current = this.commands.get(command)
+    if (current?.pluginId === pluginId) this.commands.delete(command)
   }
 
   async executeCommand(_pluginId: string, command: string, args: readonly unknown[]): Promise<unknown> {
@@ -627,6 +632,60 @@ test('隔离边界：指向插件目录内部的链接不误伤（ADR-0020）', 
   }
 })
 
+test('ADR-0020：pnpm workspace 依赖链接（目标 package.json 同名）必须放行', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture('workspace-link-ok', `module.exports = { activate() {} }\n`)
+  const externalPkg = path.join(scratch, 'workspace-link-ok-pkg')
+  await mkdir(externalPkg, { recursive: true })
+  await writeFile(
+    path.join(externalPkg, 'package.json'),
+    JSON.stringify({ name: '@vscordis/sdk', version: '0.0.0' }),
+    'utf8',
+  )
+  const scopeDir = path.join(entry.root, 'node_modules', '@vscordis')
+  await mkdir(scopeDir, { recursive: true })
+  const link = path.join(scopeDir, 'sdk')
+  try {
+    await symlink(externalPkg, link, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(
+      host.view('workspace-link-ok')?.state,
+      'active',
+      'pnpm workspace 的 @vscordis/sdk 链接不能被 reparse 门禁误伤',
+    )
+  } finally {
+    await host.unload('workspace-link-ok')
+    await host.settle()
+  }
+})
+
+test('ADR-0020：node_modules 下指向无同名 package.json 的外部链接仍拒绝', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture('workspace-link-evil', `module.exports = { activate() {} }\n`)
+  const externalDir = path.join(scratch, 'workspace-link-evil-secret')
+  await mkdir(externalDir, { recursive: true })
+  await writeFile(path.join(externalDir, 'secret.txt'), 'SECRET\n', 'utf8')
+  const nodeModules = path.join(entry.root, 'node_modules')
+  await mkdir(nodeModules, { recursive: true })
+  const link = path.join(nodeModules, 'evil')
+  try {
+    await symlink(externalDir, link, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+
+  const { host, loader } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), /指向目录外的链接/)
+  assert.equal(loader.sessionsStarted, 0, '仍然必须在 fork 前拒绝，不能起子进程')
+})
+
 test('环境变量：实际 fork 默认不继承宿主敏感变量，inheritEnv=true 才继承（ADR-0021）', async () => {
   const previous = process.env.VSCORDIS_ENV_PROBE
   process.env.VSCORDIS_ENV_PROBE = 'HOST_SECRET_VALUE'
@@ -692,6 +751,100 @@ test('隔离边界：畸形 IPC 消息只失败该会话，不能让宿主进程
   assert.equal(loader.sessionsStarted, 1, '会话确实启动过（避免"从未启动"假绿）')
   await sleep(100)
   assert.equal(loader.activeSessions, 0, '畸形消息后子进程必须被终止')
+})
+
+test('隔离边界：畸形 IPC 对象的 toString 不能打崩宿主（H1）', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'bad-tostring-ipc',
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () =>
+             ctx.vscode.commands.registerCommand('badipc.tostring', () =>
+               process.send({ kind: 1, toString: 'not-a-function' }),
+             ),
+           (d) => d.dispose(),
+           'cmd:badipc.tostring',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+  const { host, loader } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    await hostApi.executeCommand('bad-tostring-ipc', 'badipc.tostring', []).catch(() => undefined)
+
+    const deadline = Date.now() + 3_000
+    while (Date.now() < deadline && host.view('bad-tostring-ipc')?.state !== 'failed') {
+      await sleep(25)
+    }
+    assert.equal(host.view('bad-tostring-ipc')?.state, 'failed', '协议违规后宿主记录不能停在 active')
+    assert.equal(loader.activeSessions, 0, '会话必须退出')
+  } finally {
+    await host.unload('bad-tostring-ipc').catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('隔离边界：命令 ID 有归属校验，B 不能 unregister/抢注 A 的命令（H2）', async () => {
+  const hostApi = new FakeHostApi()
+  const victim = await makeFixture(
+    'cmd-owner',
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('victim.cmd', () => 'from-victim'),
+           (d) => d.dispose(),
+           'cmd:victim',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+  const unregisterer = await makeFixture(
+    'cmd-unregisterer',
+    `module.exports = {
+       activate() {
+         process.send({ kind: 'call', id: 7, method: 'commands.unregisterCommand', args: ['victim.cmd'] })
+       },
+     }\n`,
+  )
+  const hijacker = await makeFixture(
+    'cmd-hijacker',
+    `module.exports = {
+       activate(ctx) {
+         ctx.vscode.commands.registerCommand('victim.cmd', () => 'from-hijacker')
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(victim)
+    await host.load(unregisterer)
+    await host.settle()
+    assert.equal(
+      await hostApi.executeCommand('cmd-owner', 'victim.cmd', []),
+      'from-victim',
+      'B 直接发 unregister 必须被归属校验挡住',
+    )
+
+    await assert.rejects(host.load(hijacker), /已被插件/)
+    await host.settle()
+    assert.equal(host.view('cmd-hijacker')?.state, 'failed')
+    assert.equal(
+      await hostApi.executeCommand('cmd-owner', 'victim.cmd', []),
+      'from-victim',
+      '抢注失败后 victim 的命令必须仍然可用',
+    )
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
 })
 
 test('隔离边界：激活后子进程异常退出，PluginHost 必须从 active 变 failed', async () => {

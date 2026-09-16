@@ -9,5 +9,8 @@
     "packages/*/test/**/*.ts",
     "plugins/*/src/**/*.ts",
     "scripts/**/*.ts"
+  ],
+  "exclude": [
+    "packages/*/test/scratch/**"
   ]
 }

@@ -1,4 +1,4 @@
-import { realpathSync } from 'node:fs'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { readdir, realpath } from 'node:fs/promises'
 import * as path from 'node:path'
 
@@ -26,7 +26,13 @@ export class PluginPathEscapeError extends Error {
 /** `target` 是否位于 `root` 之内（不含 root 自身）。用 path.relative，Windows 下自动大小写不敏感。 */
 export function isInside(root: string, target: string): boolean {
   const relative = path.relative(root, target)
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+  // 注意不能用 `startsWith('..')`：`<root>/..evil/x` 的 relative 是 `..evil/x`，仍在 root 内。
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  )
 }
 
 export function realRootOrResolved(root: string): string {
@@ -35,6 +41,71 @@ export function realRootOrResolved(root: string): string {
   } catch {
     return path.resolve(root)
   }
+}
+
+function readPackageName(directory: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path.join(directory, 'package.json'), 'utf8'))
+    if (parsed === null || typeof parsed !== 'object') return undefined
+    const name = (parsed as { name?: unknown }).name
+    return typeof name === 'string' && name.length > 0 ? name : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 从 target（文件或目录）向上找最近一个包目录，返回其 package.json#name。 */
+function nearestPackageName(target: string): string | undefined {
+  let current: string
+  try {
+    current = statSync(target).isDirectory() ? target : path.dirname(target)
+  } catch {
+    return undefined
+  }
+  for (;;) {
+    const name = readPackageName(current)
+    if (name !== undefined) return name
+    const parent = path.dirname(current)
+    if (parent === current) return undefined
+    current = parent
+  }
+}
+
+/**
+ * `node_modules` 下的外部链接只允许两类形态，避免把 pnpm workspace 依赖误伤成逃逸：
+ *
+ * - `node_modules/<pkg>` / `node_modules/@scope/<pkg>`：目标目录的 `package.json#name`
+ *   必须等于链接名（`@vscordis/sdk -> packages/sdk` 因此放行）；
+ * - `node_modules/.bin/<name>`：目标必须位于某个包目录内（向上能找到 package.json）。
+ *
+ * 指向 `.ssh` / 系统目录的任意链接仍然会被拒绝（目标没有同名 package.json）。
+ */
+function isAllowedDependencyLink(realRoot: string, link: string, target: string): boolean {
+  const relative = path.relative(realRoot, link)
+  const segments = relative.split(path.sep)
+
+  let nodeModulesIndex = -1
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index]
+    if (segment === undefined) continue
+    const isNodeModules =
+      process.platform === 'win32' ? segment.toLowerCase() === 'node_modules' : segment === 'node_modules'
+    if (isNodeModules) {
+      nodeModulesIndex = index
+      break
+    }
+  }
+  if (nodeModulesIndex < 0) return false
+
+  const tail = segments.slice(nodeModulesIndex + 1)
+  const first = tail[0]
+  if (first === undefined) return false
+
+  if (first === '.bin') return nearestPackageName(target) !== undefined
+
+  const packageName = first.startsWith('@') ? `${first}/${tail[1] ?? ''}` : first
+  if (packageName.endsWith('/') || packageName.includes('..')) return false
+  return readPackageName(target) === packageName
 }
 
 /**
@@ -85,8 +156,11 @@ export async function assertNoEscapingReparsePoints(root: string): Promise<void>
 
         const relative = path.relative(realRoot, target)
         const insideRoot =
-          relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+          !(relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
         if (!insideRoot) {
+          // pnpm workspace 会把 `node_modules/@scope/pkg` 链接到仓库内另一个包（解析到 root 外）；
+          // 这类依赖链接按“链接名 == 目标 package.json#name”白名单放行，其余逃逸链接仍拒绝。
+          if (isAllowedDependencyLink(realRoot, full, target)) continue
           throw new PluginReparsePointError(
             `插件目录内存在指向目录外的链接：${full} → ${target}。` +
               'Node 的 --allow-fs-read 会跟随链接，必须在 fork 前拒绝（ADR-0020）。',

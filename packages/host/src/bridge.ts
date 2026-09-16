@@ -135,6 +135,16 @@ export class VscodeBridge implements HostPort {
     const api = {
       commands: {
         registerCommand: ((command: string, callback: (...args: never[]) => unknown) => {
+          // 命令 ID 是全局命名空间：禁止插件覆盖别的插件的命令（否则后者可以静默劫持）。
+          // 与隔离子进程的 VscodeHostApi 保持同一条归属规则。
+          const existingOwner = bridge.#commands.get(command)
+          if (existingOwner !== undefined && existingOwner !== deps.id) {
+            throw new PermissionDeniedError(
+              deps.id,
+              'vscode:commands.register',
+              `命令 ID "${command}" 已被插件 "${existingOwner}" 注册`,
+            )
+          }
           const disposable = track<vscode.Disposable>(
             'vscode:commands.register',
             `command:${command}`,

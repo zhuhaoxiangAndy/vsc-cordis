@@ -40,10 +40,18 @@ ADR-0013 用 `child_process.fork` + Node `--permission` + `--allow-fs-read=<plug
    而能在本机把外部文件 hardlink 进插件根的人本来就能读该文件。作为已知缺口记录。
 7. **可操作错误信息**：报出链接路径、解析后的目标和原因（“`--allow-fs-read` 会跟随链接”），
    而不是一句“加载失败”。
+8. **包管理器依赖链接白名单**（交付后 F5 回归修复）：`node_modules` 下的外部链接不能一刀切拒绝，
+   否则 `pnpm install` 产生的 workspace 链接会让所有插件加载失败。放行规则：
+   - `node_modules/<pkg>` / `node_modules/@scope/<pkg>`：目标目录的 `package.json#name` 必须等于
+     链接名（例如 `@vscordis/sdk -> packages/sdk`）；
+   - `node_modules/.bin/<name>`：目标必须位于某个包目录内（向上能找到 `package.json`）。
+   指向 `.ssh` / 系统目录等没有同名包的目标仍然拒绝。白名单检查只看链接名与目标 package.json，
+   不递归进外部目标目录。
 
 ## 后果
 
-- 带外部链接的插件包现在会被拒绝加载；monorepo 开发目录里指向 root 内的链接不受影响。
+- 除 `node_modules` 依赖白名单（决策 8）外，带外部链接的插件包会被拒绝加载；monorepo 开发目录里
+  指向 root 内的链接不受影响。
 - 每次加载 `untrusted` 插件增加一次插件目录递归扫描。插件 `main` 必须是单文件 bundle，
   插件根通常很小；这是可接受的加载期成本。
 - 扫描发生在 fork 前，因此失败路径不留下子进程、命令、输出通道等宿主侧残留。
@@ -53,7 +61,9 @@ ADR-0013 用 `child_process.fork` + Node `--permission` + `--allow-fs-read=<plug
 `packages/host/test/isolation.spec.ts`：
 
 - 外部 junction 必须被 fork 前拒绝，并断言 `sessionsStarted === 0`；
-- 指向 root 内部的 junction 正常加载并读到文件（防止“见链接就拒”的一刀切回归）。
+- 指向 root 内部的 junction 正常加载并读到文件（防止“见链接就拒”的一刀切回归）；
+- `node_modules/@vscordis/sdk -> 同名 package` 的 workspace 链接正常加载；
+- `node_modules/evil -> 无同名 package.json 的外部目录` 仍被 fork 前拒绝。
 
 两条都做了反向验证：临时移除扫描逻辑，第一条必须失败（说明它测的是修复本身，不是恒真断言）。
 

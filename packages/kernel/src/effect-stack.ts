@@ -162,10 +162,26 @@ export class EffectStack implements Disposable {
    */
   async dispose(): Promise<void> {
     if (this.#state === 'closed') return
-    if (this.#drainPromise !== undefined) return await this.#drainPromise
+    if (this.#drainPromise !== undefined) {
+      try {
+        await this.#drainPromise
+        return
+      } catch (error) {
+        // 上一次回收链异常中断：清掉缓存，让下一次 dispose() 继续回收剩余项，
+        // 而不是把一个 rejected promise 永久缓存成“整栈永远回不完”。
+        this.#drainPromise = undefined
+        throw error
+      }
+    }
     this.#state = 'draining'
-    this.#drainPromise = this.#drain()
-    await this.#drainPromise
+    const drain = this.#drain()
+    this.#drainPromise = drain
+    try {
+      await drain
+    } catch (error) {
+      this.#drainPromise = undefined
+      throw error
+    }
   }
 
   async #drain(): Promise<void> {
@@ -187,7 +203,7 @@ export class EffectStack implements Disposable {
         // 预算耗尽：**不 break** —— 剩下每一项都要留下一条"被跳过"的上报记录，
         // 静默截断会让宿主日志无法区分"没有剩余 effect"与"剩余 effect 被丢掉"。
         this.#skippedByBudget += 1
-        this.#opts.onError?.(
+        this.#report(
           new Error(`effect "${entry.label ?? '<anonymous>'}" 因整栈回收预算耗尽被跳过，teardown 未执行`),
           entry.label,
         )
@@ -208,7 +224,19 @@ export class EffectStack implements Disposable {
         await withTimeout(result as Promise<void>, timeoutMs)
       }
     } catch (error) {
-      this.#opts.onError?.(error, entry.label)
+      this.#report(error, entry.label)
+    }
+  }
+
+  /**
+   * 观察者（日志/诊断）抛错不能打断回收：否则一个坏监听器会把整栈永久卡在 draining，
+   * 后续 dispose() 全部失败（审计 F2）。核心不变量优先于观察者。
+   */
+  #report(error: unknown, label: string | undefined): void {
+    try {
+      this.#opts.onError?.(error, label)
+    } catch {
+      // 观察者错误已被隔离；没有第二个出口可以上报，且不能让它影响回收。
     }
   }
 }

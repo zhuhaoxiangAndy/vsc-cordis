@@ -47,11 +47,15 @@ function ensureWorker(): Promise<string> {
 }
 
 class SilentHostApi implements IsolatedHostApi {
-  readonly commands = new Map<string, { invoke: (args: readonly unknown[]) => Promise<unknown> }>()
+  readonly commands = new Map<string, { pluginId: string; invoke: (args: readonly unknown[]) => Promise<unknown> }>()
   #nextHandle = 1
 
-  registerCommand(_pluginId: string, command: string, invoke: (args: readonly unknown[]) => Promise<unknown>): { dispose(): void } {
-    const record = { invoke }
+  registerCommand(pluginId: string, command: string, invoke: (args: readonly unknown[]) => Promise<unknown>): { dispose(): void } {
+    const existing = this.commands.get(command)
+    if (existing !== undefined && existing.pluginId !== pluginId) {
+      throw new Error(`命令 ID "${command}" 已被插件 "${existing.pluginId}" 注册`)
+    }
+    const record = { pluginId, invoke }
     this.commands.set(command, record)
     return {
       dispose: () => {
@@ -60,8 +64,9 @@ class SilentHostApi implements IsolatedHostApi {
     }
   }
 
-  unregisterCommand(command: string): void {
-    this.commands.delete(command)
+  unregisterCommand(pluginId: string, command: string): void {
+    const current = this.commands.get(command)
+    if (current?.pluginId === pluginId) this.commands.delete(command)
   }
 
   async executeCommand(_pluginId: string, command: string, args: readonly unknown[]): Promise<unknown> {

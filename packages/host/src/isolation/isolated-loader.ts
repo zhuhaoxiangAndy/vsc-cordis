@@ -1,6 +1,6 @@
 import { fork, type ChildProcess } from 'node:child_process'
 import type { CordisPlugin, Disposable, LogLevel, Permission, PluginContext } from '@vscordis/sdk'
-import { PermissionDeniedError, ServiceRegistry, ServiceUnavailableError, describe, type LoadedPluginModule, type PluginEntry } from '@vscordis/kernel'
+import { PermissionDeniedError, ServiceRegistry, ServiceUnavailableError, type LoadedPluginModule, type PluginEntry } from '@vscordis/kernel'
 import type { EffectScopeApi } from '@vscordis/sdk'
 import { PluginIntegrityError, verifyPluginArtifact } from '../integrity.ts'
 import { assertNoEscapingReparsePoints } from '../paths.ts'
@@ -38,7 +38,7 @@ export interface IsolatedHostApi {
     command: string,
     invoke: (args: readonly unknown[]) => Promise<unknown>,
   ): Disposable
-  unregisterCommand(command: string): void
+  unregisterCommand(pluginId: string, command: string): void
   executeCommand(pluginId: string, command: string, args: readonly unknown[]): Promise<unknown>
   showMessage(
     kind: 'information' | 'warning' | 'error',
@@ -128,6 +128,8 @@ export interface IsolatedLoaderOptions {
    */
   readonly inheritEnv?: boolean
   readonly onLog?: (message: string) => void
+  /** 降级/信任边界类警告出口；未配置时回落到 `onLog`。宿主应把它接到 warn 级日志。 */
+  readonly onWarning?: (message: string) => void
   /**
    * 子进程在**激活成功后**异常退出时的回调（宿主主动 kill / 优雅停用不触发）。
    * 宿主用它把 `PluginHost` 记录标成 `failed`，避免"进程已死但状态面板仍显示 active"
@@ -240,6 +242,39 @@ function isChildToHost(message: unknown): message is ChildToHost {
   return typeof kind === 'string' && CHILD_MESSAGE_KINDS.has(kind)
 }
 
+/**
+ * 对不可信值做“永不抛”的错误格式化。
+ *
+ * 不能用 `String(value)`/`describe(value)`：恶意对象可以带一个不可调用的自有 `toString`，
+ * 让 `String()` 抛 `TypeError`；如果这个格式化发生在 message 监听器的 try/catch 外，
+ * 就等于给 untrusted 插件一个宿主 DoS。这里只读 `typeof`/固定字段，并兜底 `[type]`。
+ */
+function safeErrorText(error: unknown): string {
+  try {
+    if (error instanceof Error) return `${error.name}: ${error.message}`
+    if (error === null) return 'null'
+    const type = typeof error
+    if (type === 'string' || type === 'number' || type === 'boolean' || type === 'bigint' || type === 'undefined') {
+      return String(error)
+    }
+    return `[${type}]`
+  } catch {
+    return '<unprintable>'
+  }
+}
+
+/** 畸形消息只输出安全的类型/kind 摘要，绝不调用对象上的任何用户方法。 */
+function summarizeMessage(message: unknown): string {
+  if (message === null) return 'null'
+  if (typeof message !== 'object') return typeof message
+  try {
+    const kind = (message as { kind?: unknown }).kind
+    return typeof kind === 'string' ? `kind=${kind}` : 'object'
+  } catch {
+    return 'object'
+  }
+}
+
 export class IsolatedPluginLoader {
   readonly #options: IsolatedLoaderOptions
   /**
@@ -297,7 +332,7 @@ export class IsolatedPluginLoader {
     if (conflict === 'last-wins' && existing !== undefined && !existing.remote) {
       // 服务名是全局能力，没有信任级隔离：untrusted 提供者可以接管同进程提供者，
       // 消费者参数/返回值会进入隔离子进程。保留能力（ADR-0019 决策 8），但不能静默。
-      this.#log(
+      this.#warn(
         `[${pluginId}] untrusted 插件以 last-wins 接管同进程服务 "${name}"（原提供者 ${existing.owner}）：` +
           '消费者参数/返回值会进入隔离子进程；服务没有信任级隔离（ADR-0022）。',
       )
@@ -434,10 +469,10 @@ export class IsolatedPluginLoader {
           ? {}
           : { usePermissionModel: this.#options.usePermissionModel }),
       })
-    for (const warning of plan.warnings) this.#log(`[${pluginId}] ${warning}`)
+    for (const warning of plan.warnings) this.#warn(`[${pluginId}] ${warning}`)
 
     if (this.#options.inheritEnv === true) {
-      this.#log(
+      this.#warn(
         `[${pluginId}] 已开启 vscordis.isolation.inheritEnv：隔离子进程继承宿主完整环境变量，` +
           '可能包含 token/代理凭据等敏感值，隔离强度下降（ADR-0021）。',
       )
@@ -518,6 +553,11 @@ export class IsolatedPluginLoader {
 
   #log(message: string): void {
     this.#options.onLog?.(message)
+  }
+
+  #warn(message: string): void {
+    if (this.#options.onWarning !== undefined) this.#options.onWarning(message)
+    else this.#log(message)
   }
 }
 
@@ -652,18 +692,18 @@ class IsolatedSession {
       this.#options.log(`[${this.#pluginId}] [stderr] ${chunk.toString().trimEnd()}`),
     )
     child.on('message', (message: unknown) => {
-      if (!isChildToHost(message)) {
-        this.#protocolViolation(`收到非法的隔离 IPC 消息：${describe(message)}`)
-        return
-      }
       try {
+        if (!isChildToHost(message)) {
+          this.#protocolViolation(`收到非法的隔离 IPC 消息（${summarizeMessage(message)}）`)
+          return
+        }
         this.#handle(message)
       } catch (error) {
-        this.#protocolViolation(`处理 ${message.kind} 消息时抛错：${errorToWire(error)}`)
+        this.#protocolViolation(`处理子进程消息时抛错：${safeErrorText(error)}`)
       }
     })
     child.on('error', (error: Error) => {
-      this.#failAll(`子进程错误：${errorToWire(error)}`)
+      this.#failAll(`子进程错误：${safeErrorText(error)}`)
     })
 
     this.#exited.promise.catch(() => undefined)
@@ -867,10 +907,15 @@ class IsolatedSession {
         }
         case 'commands.unregisterCommand': {
           // 撤销不做权限校验：否则权限被回收后旧命令会永远摘不掉。
+          // 但必须做**归属**校验：pluginId 由宿主注入，B 不能撤销 A 注册的命令
+          // （否则可以先 unregister 再抢注同名 ID，形成命令劫持）。
           const command = String(call.args[0] ?? '')
-          this.#commandHandles.get(command)?.dispose()
-          this.#commandHandles.delete(command)
-          this.#options.hostApi.unregisterCommand(command)
+          const handle = this.#commandHandles.get(command)
+          if (handle !== undefined) {
+            handle.dispose()
+            this.#commandHandles.delete(command)
+          }
+          this.#options.hostApi.unregisterCommand(pluginId, command)
           this.#reply(call.id, undefined)
           break
         }
@@ -1052,7 +1097,7 @@ class IsolatedSession {
         }
       }
     } catch (error) {
-      this.#replyError(call.id, errorToWire(error))
+      this.#replyError(call.id, safeErrorText(error))
     }
   }
 

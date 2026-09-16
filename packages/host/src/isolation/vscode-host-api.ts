@@ -65,6 +65,14 @@ export class VscodeHostApi implements IsolatedHostApi {
     command: string,
     invoke: (args: readonly unknown[]) => Promise<unknown>,
   ): Disposable {
+    const existing = this.#commands.get(command)
+    if (existing !== undefined && existing.pluginId !== pluginId) {
+      throw new PermissionDeniedError(
+        pluginId,
+        'vscode:commands.register',
+        `命令 ID "${command}" 已被插件 "${existing.pluginId}" 注册`,
+      )
+    }
     const disposable = vscode.commands.registerCommand(command, (...args: unknown[]) => invoke(args))
     this.#commands.set(command, { pluginId, disposable })
     return {
@@ -76,11 +84,12 @@ export class VscodeHostApi implements IsolatedHostApi {
     }
   }
 
-  unregisterCommand(command: string): void {
-    // 句柄的 dispose 由 IsolatedSession 负责；这里清归属记账，并在兜底路径里真的注销。
+  unregisterCommand(pluginId: string, command: string): void {
+    // 句柄的 dispose 由 IsolatedSession 负责；这里做归属校验，只允许撤销自己注册的命令。
     const current = this.#commands.get(command)
+    if (current === undefined || current.pluginId !== pluginId) return
     this.#commands.delete(command)
-    current?.disposable.dispose()
+    current.disposable.dispose()
   }
 
   async executeCommand(pluginId: string, command: string, args: readonly unknown[]): Promise<unknown> {

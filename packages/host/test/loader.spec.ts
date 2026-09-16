@@ -149,4 +149,6 @@ test('isInside 的边界', () => {
   assert.equal(isInside(root, root), false)
   assert.equal(isInside(root, path.resolve('/repo/plugins/hello-other/index.cjs')), false)
   assert.equal(isInside(root, path.resolve('/repo/plugins/../other/index.cjs')), false)
+  // `..evil` 是 root 内的普通目录名，不能被 startsWith('..') 误判成越界（审计 M1）
+  assert.equal(isInside(root, path.resolve('/repo/plugins/hello/..evil/index.cjs')), true)
 })

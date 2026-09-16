@@ -131,6 +131,30 @@ test('I3：teardown 超时被记为失败但不阻断回收', async () => {
   assert.equal(stack.size, 0)
 })
 
+test('I3：onError 观察者抛错不能卡住回收', async () => {
+  let observerCalls = 0
+  const order: string[] = []
+  const stack = new EffectStack({
+    onError: () => {
+      observerCalls += 1
+      throw new Error('observer boom')
+    },
+  })
+  stack.add(() => void order.push('tail'), 'tail')
+  stack.add(() => {
+    throw new Error('plugin boom')
+  }, 'bad')
+
+  // 修复前：observer 抛错让 #drain 异常中断，closed 永不置位，后续 dispose 永远 reject
+  await stack.dispose()
+
+  assert.deepEqual(order, ['tail'], '坏观察者不能阻断 tail 的回收')
+  assert.equal(observerCalls, 1)
+  assert.equal(stack.closed, true)
+  assert.equal(stack.size, 0)
+  await stack.dispose() // 幂等
+})
+
 test('I4：闭栈后登记的副作用立即被回收（卸载/注册竞态不逃逸）', async () => {
   const stack = new EffectStack()
   await stack.dispose()
