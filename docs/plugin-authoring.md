@@ -78,16 +78,16 @@ export default {
 | 运行位置 | 扩展宿主进程内 | 独立子进程 |
 | 安全边界 | **无**（只防误用：你仍能绕过受控 API，见 ADR-0003） | 真边界：无 `vscode`、fs 受 Node 权限模型限制 |
 | 性能 | 直接调用 | 每次 API 调用都是一次 IPC 往返 |
-| 服务（`ctx.use` / `provide`） | ✅ | ❌ 抛错（服务是**带方法的进程内对象**，代理会让 `now()` 从 `Date` 变成 `Promise<Date>`） |
+| 服务 | ✅ `ctx.use` / `ctx.provide` | ⚠️ `ctx.provide` 可用；同步 `ctx.use` **永久拒绝**（改用 `ctx.async.useService`，见 ADR-0019） |
 | `getConfiguration` | ✅ | ✅ **按声明预取**：在 `plugin.json` 里写 `configuration`，宿主预取并在配置变化时推送 |
 | `createStatusBarItem` | ✅ | ✅ 本地镜像 + 串行 RPC（读属性是同步的；未支持的属性会**响亮抛错**） |
-| `onDidSaveTextDocument`（`ctx.vscode.*`，同步签名） | ✅ | ❌ 抛错 —— 但**错误信息会告诉你改用 `ctx.async`** |
+| `onDidSaveTextDocument`（`ctx.vscode.*`，同步签名） | ✅ | ❌ 抛错；改用 `ctx.async.onDidSaveTextDocument`（ADR-0018） |
 | 命令 handler | 同步/异步都可以 | 宿主会**反向调用**你的 handler 并把结果回传 |
 | 适合 | 自研、团队内部、需要服务协作的插件 | 第三方、需要真隔离的插件 |
 
 **同一份插件代码在两种模式下写法一致**，差异只在运行时的能力边界上。
-两个 ❌ 是**设计边界而非待办**：要支持它们，就得给隔离模式一套独立的、显式异步的 API 面，
-那会让"同一份代码两边一样"这个前提失效。理由见 ADR-0016。
+带 ❌/⚠️ 的是**设计边界而非待办**：隔离模式通过 `ctx.async` 提供显式异步面（事件 + 服务），
+而不是给同步 API 伪造 Promise。理由见 ADR-0016 / 0018 / 0019。
 
 ### 隔离模式读配置：必须声明
 

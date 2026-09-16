@@ -91,7 +91,8 @@
   `exclusive` 或自行校验 owner/version。
 - 文档更正：ADR-0005 如实记录 `net` 拦截可被 `process.getBuiltinModule()` / 动态 `import()` /
   全局 `fetch` 绕过，并说明 `fs:read` 在隔离下不扩大边界；清理 M1/M2“留待后续”过时表、
-  signing/README 的隔离与版本表述、README 体积/配置表漂移。
+  signing/README 的隔离与版本表述、README 体积/配置表漂移；`plugin-authoring` 隔离能力表
+  改为当前事实（`ctx.provide` 可用、同步 `ctx.use` 永久拒绝、事件/服务走 `ctx.async`）。
 - **`VscodeHostApi.dispose()` 此前没有调用点，且只清 Map 不真正注销命令/不回收文档句柄**：
   现在命令记账保存底层 disposable、`dispose()` 真正注销并清空文档句柄；`Runtime.dispose()`
   兜底调用，新增 `vscode-host-api.spec.ts` 契约测试。

@@ -182,11 +182,15 @@ vscordis 依赖图：4 个插件，1 个服务
 | --- | --- | --- |
 | 同进程受控 API 插件 | ✅ | ✅ |
 | 运行期加载磁盘上的插件 | ✅ | ❌ 浏览器无法运行期加载代码，仅支持**构建期内置**插件 |
-| 文件监听自动热重载 | ✅（`npm run watch` + `vscordis.hotReload`） | 不适用 |
+| 文件监听自动热重载 | ✅（`pnpm run watch` + `vscordis.hotReload`） | 不适用 |
 | 手动 reload（拿到新模块实例） | ✅ | ✅（内置插件重新取工厂产物） |
 | 显式异步面 `ctx.async`（事件 + 跨进程服务） | ✅ | ✅（同一份 kernel 实现，签名一致） |
 | 子进程隔离（untrusted） | ✅ M4b（`docs/acceptance-m4b.md`） | ❌ 直接拒绝加载（fail-closed） |
 | 签名与哈希校验 | ✅ M4a（`docs/signing.md`） | ✅ 同一实现（平台无关） |
+
+> 隔离子进程依赖的 `--permission` 已在 **Electron-as-Node** 模式预验证
+> （VSCode 1.118.1 / Electron 39.8.8 / Node 22.22.1），但真实 Extension Host(F5) 仍未验收；
+> 验收状态与逃生开关以 `docs/acceptance-quick.md` / `docs/acceptance-m4b.md` 为准。
 
 ## 已知硬限制（均有 ADR 与一手证据）
 
