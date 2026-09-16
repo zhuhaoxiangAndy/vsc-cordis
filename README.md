@@ -130,6 +130,7 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 ```bash
 pnpm run tree                      # 服务依赖图（本仓库真实输出见下）
 pnpm run cli -- tree --mermaid     # Mermaid flowchart，可直接贴进 Markdown
+pnpm run cli -- tree --json        # 机器可读 JSON（CI / 编辑器工具；与 --mermaid 互斥）
 pnpm run cli -- create my-plugin --trust untrusted
 pnpm run cli -- list               # 退出码 1 = 发现问题，可直接进 CI
 ```

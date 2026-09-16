@@ -229,3 +229,34 @@ test('readHostVersion：与 packages/host/package.json 的 version 一致（src/
   ) as { version: string }
   assert.equal(readHostVersion(), pkg.version)
 })
+
+test('tree --json：输出可解析的依赖图 JSON（机器可读，供 CI/编辑器工具）', async () => {
+  const root = path.join(scratch, `tree-json-${runId}`)
+  await writePlugin(root, 'provider', { provides: ['clock'] })
+  await writePlugin(root, 'consumer', { dependencies: { clock: '^1.0.0' } })
+
+  const result = await run(['tree', '--json', '--root', root])
+  assert.equal(result.code, 0, result.err)
+
+  const graph = JSON.parse(result.out) as {
+    plugins: { id: string }[]
+    services: { name: string; providers: string[] }[]
+    findings: unknown[]
+    loadOrder: string[]
+    consumers: Record<string, string[]>
+  }
+  assert.deepEqual(graph.plugins.map((candidate) => candidate.id).sort(), ['consumer', 'provider'])
+  assert.deepEqual(graph.services, [{ name: 'clock', providers: ['provider'] }])
+  assert.deepEqual(graph.findings, [])
+  assert.deepEqual(graph.loadOrder, ['provider', 'consumer'])
+  assert.deepEqual(graph.consumers.clock, ['consumer'])
+})
+
+test('tree：--mermaid 与 --json 同时给 → 用法错误（退出码 2，而不是猜一个输出）', async () => {
+  const root = path.join(scratch, `tree-both-${runId}`)
+  await writePlugin(root, 'solo', {})
+
+  const result = await run(['tree', '--json', '--mermaid', '--root', root])
+  assert.equal(result.code, 2)
+  assert.match(result.err, /不能同时使用/)
+})

@@ -17,6 +17,7 @@ export const HELP = `vscordis —— 把 Cordis 的时空可组合性带到 VSCo
   tree                   打印服务依赖图
     --root <目录>        插件根（默认 plugins）
     --mermaid            输出 Mermaid flowchart（可直接贴进 Markdown）
+    --json               输出机器可读 JSON（CI / 编辑器工具；与 --mermaid 互斥）
 
   sign <插件目录>        签名插件（写入 integrity 与 plugin.sig）
     --key <私钥路径>     默认 %USERPROFILE%\\.dsh\\keys\\vscordis-ed25519.pem
@@ -58,7 +59,10 @@ export async function main(argv: readonly string[], cwd: string): Promise<number
       return await runList(ctx, flagValue(args, 'root', 'plugins'))
 
     case 'tree':
-      return await runTree(ctx, flagValue(args, 'root', 'plugins'), hasFlag(args, 'mermaid'))
+      return await runTree(ctx, flagValue(args, 'root', 'plugins'), {
+        mermaid: hasFlag(args, 'mermaid'),
+        json: hasFlag(args, 'json'),
+      })
 
     case 'sign': {
       const target = args.positionals[0]

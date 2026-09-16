@@ -4,7 +4,7 @@ import * as path from 'node:path'
 import type { PluginEntry } from '@vscordis/kernel'
 import { discoverPlugins, sortByDependencies } from '../../host/src/discovery.ts'
 import { signPluginDirectory, verifyPluginArtifact } from '../../host/src/integrity.ts'
-import { buildGraph, renderMermaid, renderText, type GraphPlugin } from './graph.ts'
+import { buildGraph, renderJson, renderMermaid, renderText, type GraphPlugin } from './graph.ts'
 
 /**
  * CLI 命令实现。
@@ -57,7 +57,22 @@ export function readHostVersion(): string | undefined {
   }
 }
 
-export async function runTree(ctx: CommandContext, root: string, mermaid: boolean): Promise<number> {
+export interface TreeOutputOptions {
+  readonly mermaid?: boolean
+  /** 机器可读输出；与 `mermaid` 互斥（同时给属于用法错误）。 */
+  readonly json?: boolean
+}
+
+export async function runTree(
+  ctx: CommandContext,
+  root: string,
+  options: TreeOutputOptions = {},
+): Promise<number> {
+  if (options.mermaid === true && options.json === true) {
+    ctx.err('用法错误：tree 的 --mermaid 与 --json 不能同时使用（二选一）')
+    return 2
+  }
+
   const { entries, problems } = await discover(root)
   if (entries.length === 0 && problems.length === 0) {
     ctx.err(`在 ${root} 下没有发现任何插件（每个插件目录需要包含 plugin.json）`)
@@ -65,7 +80,11 @@ export async function runTree(ctx: CommandContext, root: string, mermaid: boolea
   }
 
   const graph = buildGraph(toGraphPlugins(entries), { hostVersion: readHostVersion() })
-  ctx.out(mermaid ? renderMermaid(graph) : renderText(graph))
+  if (options.json === true) {
+    ctx.out(renderJson(graph))
+  } else {
+    ctx.out(options.mermaid === true ? renderMermaid(graph) : renderText(graph))
+  }
 
   if (problems.length > 0) {
     ctx.out('')

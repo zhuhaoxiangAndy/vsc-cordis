@@ -30,6 +30,11 @@ jobs:
       - name: 单元测试（kernel + 加载器）
         run: pnpm test
 
+      # 文档是这个仓库交付物的一部分：相对链接与行内代码里的仓库路径必须存在。
+      # 检查器自身的"坏链接会失败"由 packages/cli/test/doc-links.spec.ts 反向验证。
+      - name: 文档链接检查
+        run: pnpm run check:docs
+
       - name: 构建（插件 + Node 宿主 + Web 宿主）
         run: pnpm run build
 

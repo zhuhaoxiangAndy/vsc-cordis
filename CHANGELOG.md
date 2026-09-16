@@ -23,6 +23,10 @@
 - **可诊断性**：`PluginHost.queueDepth`（串行队列"排队中 + 执行中"的任务数）暴露到
   `vscordis: 显示运行时状态` —— 长时间 >0 就说明某个生命周期任务卡住，比"宿主没反应"精确得多。
 - **快速验收单** `docs/acceptance-quick.md`：≈10 分钟走完五条主线，含 `permissionModel` 逃生开关。
+- **`tree --json`**：依赖图的机器可读输出（CI / 编辑器工具；`--mermaid` 与 `--json` 互斥，同给报用法错误）。
+- **文档链接检查成为门禁**：`scripts/check-doc-links.mjs` 校验 Markdown 链接与行内代码里的仓库路径
+  （含 ADR 编号短引用，如 `docs/adr/0002`），接入 `pnpm run verify` 与 CI；
+  检查器自身的"坏链接会失败"有反向验证测试。
 - 内核新增导出：`normalizeVersion`（宿主与 CLI 共用归一化规则）、`RemoteServiceError`。
 
 ### 修复

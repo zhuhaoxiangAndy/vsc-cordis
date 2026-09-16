@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildGraph, renderMermaid, renderText, type GraphPlugin } from '../src/graph.ts'
+import { buildGraph, renderJson, renderMermaid, renderText, type GraphPlugin } from '../src/graph.ts'
 
 function plugin(id: string, overrides: Partial<GraphPlugin> = {}): GraphPlugin {
   return {
@@ -114,6 +114,17 @@ test('engines.vscode 不去猜：CLI 不知道用户装了哪个 VSCode，不产
     hostVersion: '0.1.0',
   })
   assert.deepEqual(graph.findings, [])
+})
+
+test('renderJson：可被 JSON.parse 还原且字段不裁剪（机器可读输出）', () => {
+  const graph = buildGraph([
+    plugin('provider', { provides: ['clock'] }),
+    plugin('consumer', { dependencies: { clock: '^1.0.0' } }),
+  ])
+
+  const text = renderJson(graph)
+  assert.deepEqual(JSON.parse(text), graph)
+  assert.ok(text.endsWith('\n'), '以换行结尾，方便直接重定向到文件')
 })
 
 test('findings 排序：error 在前', () => {

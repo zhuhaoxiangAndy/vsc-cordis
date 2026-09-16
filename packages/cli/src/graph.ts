@@ -266,6 +266,16 @@ export function renderText(graph: DependencyGraph): string {
   return lines.join('\n')
 }
 
+/**
+ * 机器可读输出（CI / 编辑器工具用）。
+ *
+ * 刻意**不裁剪字段**：`findings` / `loadOrder` / `consumers` 全在，消费方自己决定怎么用。
+ * 输出以换行结尾，方便直接重定向到文件。
+ */
+export function renderJson(graph: DependencyGraph): string {
+  return `${JSON.stringify(graph, null, 2)}\n`
+}
+
 /** Mermaid flowchart —— 可直接贴进 Markdown / GitHub issue 里看。 */
 export function renderMermaid(graph: DependencyGraph): string {
   const lines: string[] = ['flowchart LR']
