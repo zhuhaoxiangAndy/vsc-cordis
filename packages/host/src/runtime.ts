@@ -218,7 +218,7 @@ export class Runtime {
 
     const byDir = new Map(this.#entries.map((entry) => [normalizeDir(entry.root), entry]))
     const targets: PluginEntry[] = []
-    const removed: string[] = []
+    const removed: { readonly id: string; readonly reason: string }[] = []
     const idChanges: { readonly oldId: string; readonly entry: PluginEntry }[] = []
 
     for (const dir of plan.changedDirs) {
@@ -235,14 +235,20 @@ export class Runtime {
         }
         continue
       }
-      // 目录已消失 → 卸载它此前对应的插件。保守起见只在"目录确实不存在"时才这么做，
-      // 避免一次瞬时 IO 失败把全部插件卸掉。
-      if (previousId !== undefined && !existsSync(dir)) removed.push(previousId)
+      if (previousId === undefined) continue
+
+      // 目录/清单已消失 → 卸载旧 incarnation。保守边界：只有确认文件不存在才卸载，
+      // 避免编辑器"先截断再写入"之间的瞬时空窗把插件误卸掉（ADR-0011 决策 6/7）。
+      if (!existsSync(dir)) {
+        removed.push({ id: previousId, reason: '插件目录已删除' })
+      } else if (!existsSync(path.join(dir, 'plugin.json'))) {
+        removed.push({ id: previousId, reason: 'plugin.json 已删除（目录仍在）' })
+      }
     }
 
-    for (const id of removed) {
+    for (const { id, reason } of removed) {
       await this.host.unload(id)
-      this.bridge.log('info', `[热重载] 插件目录已删除，已卸载 ${id}`)
+      this.bridge.log('info', `[热重载] ${reason}，已卸载 ${id}`)
     }
 
     for (const change of idChanges) {

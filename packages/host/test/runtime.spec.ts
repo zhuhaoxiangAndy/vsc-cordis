@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { registerHooks } from 'node:module'
 import * as path from 'node:path'
 import { beforeEach, test } from 'node:test'
@@ -310,6 +310,51 @@ test('runtime：热重载改 plugin.json#id 后旧 incarnation 与旧命令必�
     assert.equal(runtime.host.view('old-id'), undefined, '改 id 后旧 incarnation 必须被卸载')
     assert.equal(stub.state.commands.has('old.cmd'), false, '旧命令必须从注册表消失（无幽灵命令）')
     assert.equal(stub.state.commands.has('new.cmd'), true, '新命令应当已注册')
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('runtime：plugin.json 被删除（目录仍在）→ 旧 incarnation 必须卸载', async () => {
+  const root = path.join(scratch, `runtime-manifest-deleted-${runId}`)
+  const pluginRoot = path.join(root, 'plugins')
+  await writePlugin(
+    pluginRoot,
+    'ghost',
+    { permissions: ['vscode:commands.register'] },
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('ghost.run', () => 1),
+           (d) => d.dispose(),
+           'cmd:ghost.run',
+         )
+       },
+     }\n`,
+  )
+  stub.setConfig('vscordis', 'pluginRoots', [pluginRoot])
+  stub.setConfig('vscordis', 'autoLoad', true)
+  stub.setConfig('vscordis', 'hotReload', true)
+  stub.setConfig('vscordis', 'hotReloadDebounceMs', 10)
+
+  const runtime = makeRuntime(path.join(scratch, `runtime-manifest-deleted-store-${runId}`))
+  try {
+    await runtime.initialize()
+    assert.equal(runtime.host.view('ghost')?.state, 'active', '哨兵：清单删除前确实 active')
+    assert.equal(stub.state.commands.has('ghost.run'), true, '哨兵：旧命令确实已注册')
+
+    // 用 rename 模拟“plugin.json 被删/移走”，目录仍在；决策 7 要求卸载旧 incarnation
+    await rename(
+      path.join(pluginRoot, 'ghost', 'plugin.json'),
+      path.join(pluginRoot, 'ghost', 'plugin.json.bak'),
+    )
+
+    const deadline = Date.now() + 8_000
+    while (Date.now() < deadline && runtime.host.view('ghost') !== undefined) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.equal(runtime.host.view('ghost'), undefined, 'plugin.json 消失后旧插件不能继续 active')
+    assert.equal(stub.state.commands.has('ghost.run'), false, '旧命令必须被注销')
   } finally {
     await runtime.dispose()
   }

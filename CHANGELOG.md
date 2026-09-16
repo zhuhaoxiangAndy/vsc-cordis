@@ -80,6 +80,8 @@
   并发 dispose 复用同一条回收链；draining 期间新增/提前 dispose 的项回到队列按 LIFO 执行。
 - **热重载改 `plugin.json#id` 留下旧 incarnation 与幽灵命令**：同目录 id 变化时先卸载旧 id，
   再加载新 id，并重建 `dir → id` 映射（避免目录改名后误卸载活插件）。
+- **`plugin.json` 被删除（目录仍在）后旧 incarnation 仍 active**：现在确认文件不存在时卸载旧 id；
+  文件存在但解析失败保持旧版本，避免编辑器两次写入之间的瞬时空窗误卸载（ADR-0011 决策 7）。
 - **隔离子进程激活后异常退出，`PluginHost` 仍显示 active**：loader 通过 `onUnexpectedExit`
   上报，`PluginHost.reportExternalFailure()` 走串行队列转 `failed` 并回收宿主侧副作用。
 - **热重载计划未串行化**：debounce 窗口外的多个 plan 现在排队处理，`Runtime.dispose()`
