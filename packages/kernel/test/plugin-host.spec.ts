@@ -431,3 +431,44 @@ test('disposeBudgetMs：预算耗尽后跳过剩余 teardown，并逐项记日�
   assert.match(details, /预算耗尽/)
   assert.match(details, /fast/, '被跳过的项必须留下可检索的记录（不能静默 break）')
 })
+
+test('PluginView.effectCount：active 时是当前副作用项数，paused / 卸载后归零', async () => {
+  const port = new FakeHostPort()
+  port.define('counted', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.onDispose(() => undefined, 'a')
+      ctx.onDispose(() => undefined, 'b')
+    },
+  }))
+  // 真实副作用（命令）也要计入；不断言具体条数，避免绑定桥接层的实现细节
+  port.define('commander', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.effect(
+        () => ctx.vscode.commands.registerCommand('commander.run', () => 1),
+        (disposable) => disposable.dispose(),
+        'cmd',
+      )
+    },
+  }))
+  port.define('waiter', (): CordisPlugin => ({ activate() {} }))
+
+  const host = hostFor(port)
+  await host.load(makeEntry('counted'))
+  await host.settle()
+  assert.equal(host.view('counted')?.effectCount, 2, '两个 onDispose 应当对应两项')
+
+  await host.load(makeEntry('commander', { permissions: WITH_COMMAND }))
+  await host.settle()
+  assert.ok((host.view('commander')?.effectCount ?? 0) >= 1, '命令这类真实副作用必须计入')
+
+  // 缺依赖的插件停在 paused：它**从未建过副作用栈**（预检在模块加载前就拦下了）→ 0
+  await host.load(makeEntry('waiter', { dependencies: { nowhere: '^1.0.0' } }))
+  await host.settle()
+  assert.equal(host.view('waiter')?.state, 'paused')
+  assert.equal(host.view('waiter')?.effectCount, 0)
+
+  await host.unload('counted')
+  await host.settle()
+  assert.equal(host.view('counted'), undefined, '卸载后记录消失，effectCount 也随之不可见')
+  await host.dispose()
+})

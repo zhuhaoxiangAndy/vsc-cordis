@@ -27,9 +27,9 @@
 | `plugins/*` | — | 示例插件（esbuild 打成单文件 CJS）。 |
 | `docs/design/overview.md` | — | **架构总览**：分层理由、核心不变式、生命周期走查、贡献者地图。 |
 | `docs/plugin-authoring.md` | — | **插件作者指南**：字段速查、权限速查、两种模式差异、会静默失败的写法、调试手册。 |
-| `docs/adr` | — | 架构决策记录，每条含权衡与否决方案。 |
+| `docs/adr/` | — | 架构决策记录（每条含权衡与否决方案）；入口见 `docs/adr/README.md`（索引 + 阅读路径）。 |
 | `docs/signing.md` | — | 签名与完整性校验操作手册。 |
-| `docs/acceptance-*.md` | — | 手动验收步骤、时延预算与未覆盖范围。 |
+| `docs/acceptance-quick.md` | — | **10 分钟手动验收主线**；细节见 `docs/acceptance-*.md`（分里程碑验收表）。 |
 
 ## 快速开始
 

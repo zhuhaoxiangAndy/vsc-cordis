@@ -418,7 +418,10 @@ export class Runtime {
     if (views.length === 0) lines.push('  <无>')
     for (const view of views) {
       lines.push(`  ${statusIcon(view)} ${view.id}@${view.version} [${view.state}] (${view.source})`)
-      lines.push(`      provides=${view.provides.join(',') || '-'} depends=${Object.entries(view.dependencies).map(([n, r]) => `${n}${r}`).join(',') || '-'}`)
+      lines.push(
+        `      provides=${view.provides.join(',') || '-'} depends=${Object.entries(view.dependencies).map(([n, r]) => `${n}${r}`).join(',') || '-'}` +
+          ` · effects=${view.effectCount}`,
+      )
       if (view.missing.length > 0) lines.push(`      等待依赖：${view.missing.join(', ')}`)
       if (view.error !== undefined) lines.push(`      错误：${view.error}`)
     }

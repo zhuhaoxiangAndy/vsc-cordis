@@ -54,3 +54,5 @@
   `docs/acceptance-m4b.md` 同步新能力与手动验收步骤。
 - `docs/design/overview.md` 修正「两种执行模式」表中一行过时描述（"服务跨进程 ❌"），补贡献者地图。
 - 新增 `docs/acceptance-quick.md`（≈10 分钟验收主线）并从 README「快速开始」链入。
+- 新增 `docs/adr/README.md`：19 份 ADR 的索引（编号/标题/状态 + 按主题与首次阅读路径），
+  从 README 目录链入；索引里的 19 条链接由文档链接门禁守着。

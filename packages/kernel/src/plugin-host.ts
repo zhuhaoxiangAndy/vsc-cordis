@@ -59,6 +59,13 @@ export interface PluginView {
   readonly dependencies: Readonly<Record<string, string>>
   readonly missing: readonly ServiceName[]
   readonly error: string | undefined
+  /**
+   * 当前副作用栈里的项数（诊断用）。
+   *
+   * active 插件通常 > 0（命令、监听器、定时器都登记在这里）；`paused` / `failed` 必然是 0 ——
+   * 暂停会**完整卸载**（ADR-0007 决策 4），所以这个数字也是"暂停时到底回收干净没有"的现场证据。
+   */
+  readonly effectCount: number
 }
 
 export interface TransitionEvent {
@@ -594,6 +601,8 @@ export class PluginHost {
       dependencies: manifest.dependencies,
       missing: record.missing,
       error: record.error === undefined ? undefined : describe(record.error),
+      // 记录被保留但栈已回收（paused/failed）时是 0；active 时是当前活着的副作用项数。
+      effectCount: record.effects?.size ?? 0,
     }
   }
 
