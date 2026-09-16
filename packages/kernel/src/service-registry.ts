@@ -105,8 +105,17 @@ export class ServiceRegistry {
 
     const affected = existing !== undefined && existing.owner !== owner ? this.affectedBy(existing.owner) : []
 
+    // last-wins 换人后，旧 owner 的 provides 集合必须摘掉这个服务名；
+    // 否则 `providesOf` / tree / 状态面板仍会显示"旧提供者还提供它"。
+    if (existing !== undefined && existing.owner !== owner) {
+      const previousSet = this.#provides.get(existing.owner)
+      previousSet?.delete(name)
+      if (previousSet?.size === 0) this.#provides.delete(existing.owner)
+    }
+
     slot.provider = { owner, version: options.version, instance, remote: options.remote === true }
     slot.generation += 1
+    const generation = slot.generation
     let mine = this.#provides.get(owner)
     if (mine === undefined) {
       mine = new Set<ServiceName>()
@@ -127,15 +136,21 @@ export class ServiceRegistry {
       dispose: (): void => {
         if (revoked) return
         revoked = true
-        this.revoke(owner, name)
+        // 绑定 generation：同一 owner 再次 provide 后，旧 handle 不能撤销新提供者。
+        this.revoke(owner, name, generation)
       },
     }
   }
 
-  /** 撤销某插件对某服务的提供；若当前提供者不是它，则是空操作。 */
-  revoke(owner: PluginId, name: ServiceName): void {
+  /**
+   * 撤销某插件对某服务的提供；若当前提供者不是它（或 generation 已被更新）则是空操作。
+   *
+   * `generation` 由 `provide` 返回的 handle 自动携带；外部手动调用可以省略（保持旧语义）。
+   */
+  revoke(owner: PluginId, name: ServiceName, generation?: number): void {
     const slot = this.#slots.get(name)
     if (slot === undefined || slot.provider === undefined || slot.provider.owner !== owner) return
+    if (generation !== undefined && slot.generation !== generation) return
 
     // 关键顺序：affectedBy 依赖 #provides/#slots 的当前状态，必须先算级联再拆除。
     const affected = this.affectedBy(owner)
@@ -248,7 +263,13 @@ export class ServiceRegistry {
       slot = { provider: undefined, generation: 0, consumers: new Map() }
       this.#slots.set(name, slot)
     }
-    slot.consumers.set(consumer, { kind, range })
+    // 同一消费者对同一服务可能先后登记 hard / soft：hard 是更强约束，不能被 soft 降级。
+    // range 也不允许 soft 覆盖已登记的 hard range（否则级联判定会看到错误的范围）。
+    const previous = slot.consumers.get(consumer)
+    const effectiveKind: DependencyKind = previous?.kind === 'hard' ? 'hard' : kind
+    const effectiveRange =
+      previous?.kind === 'hard' && kind === 'soft' ? previous.range : (range ?? previous?.range)
+    slot.consumers.set(consumer, { kind: effectiveKind, range: effectiveRange })
 
     let detached = false
     return {

@@ -51,6 +51,41 @@ test('显式 last-wins：新提供者接管，并通知消费者级联', () => {
   assert.deepEqual(replaced?.affected, ['consumer'])
 })
 
+test('provide handle 绑定 generation：旧 handle 不能撤销同 owner 的新提供者', () => {
+  const registry = new ServiceRegistry()
+  const first = registry.provide('p', 'clock', 1, { version: '1.0.0' })
+  const second = registry.provide('p', 'clock', 2, { version: '1.0.0' })
+  assert.equal(registry.resolve('clock'), 2)
+
+  first.dispose()
+  assert.equal(registry.resolve('clock'), 2, '旧 handle 的 dispose 不能撤销新提供者')
+  assert.equal(registry.providerInfo('clock')?.owner, 'p')
+
+  second.dispose()
+  assert.equal(registry.providerInfo('clock'), undefined)
+})
+
+test('last-wins 换人后旧 owner 的 providesOf 必须清理', () => {
+  const registry = new ServiceRegistry()
+  registry.provide('a', 'clock', 1, { version: '1.0.0' })
+  registry.provide('b', 'clock', 2, { version: '1.0.0', conflict: 'last-wins' })
+
+  assert.deepEqual(registry.providesOf('a'), [], '被替换者不能再声称提供 clock')
+  assert.deepEqual(registry.providesOf('b'), ['clock'])
+})
+
+test('hard 依赖边不会被后来的 soft 边覆盖（range 也不被 soft 改写）', () => {
+  const registry = new ServiceRegistry()
+  registry.provide('prov', 'clock', 1, { version: '1.0.0' })
+  registry.depend('cons', 'clock', 'hard', '^1.0.0')
+  registry.depend('cons', 'clock', 'soft')
+
+  assert.deepEqual(registry.snapshot().edges, [
+    { consumer: 'cons', service: 'clock', kind: 'hard', range: '^1.0.0' },
+  ])
+  assert.deepEqual(registry.affectedBy('prov'), ['cons'], 'hard 边必须保留并继续参与级联')
+})
+
 test('revoke 事件携带受影响的硬依赖消费者', () => {
   const registry = new ServiceRegistry()
   const events: ServiceChangeEvent[] = []

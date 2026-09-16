@@ -155,9 +155,16 @@ export class PluginHost {
    *
    * 为什么需要它：卸载一个提供者时，消费者的暂停/恢复是排队在当前任务**之后**的新任务。
    * 若调用方需要观察稳定的终态（"卸载后无残留"的断言、状态展示、CLI 输出），必须先 settle。
+   *
+   * 实现要点：不能只入队一个空任务当屏障 —— 一个任务在 `await` 之后才产生级联任务时，
+   * 那个级联任务会排在空屏障**后面**，settle 就会带着"半个级联状态"返回（审计复现）。
+   * 这里改成反复等当前队列尾部；等待期间若有新任务入队，`queueDepth` 仍 > 0，就继续等，
+   * 直到真正没有未完成任务为止。
    */
   async settle(): Promise<void> {
-    await this.#enqueue(async () => {})
+    while (this.#queueDepth > 0) {
+      await this.#queue
+    }
   }
 
   /**

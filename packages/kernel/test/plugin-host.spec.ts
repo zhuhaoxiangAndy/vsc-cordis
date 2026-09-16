@@ -488,3 +488,53 @@ test('PluginView.effectCount：active 时是当前副作用项数，paused / 卸
   assert.equal(host.view('counted'), undefined, '卸载后记录消失，effectCount 也随之不可见')
   await host.dispose()
 })
+
+test('settle：必须等到级联产生的后续任务完成，而不是单次 no-op 屏障', async () => {
+  const port = new FakeHostPort()
+  port.define('q', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.provide('c', { v: 'from-q' }, { version: '1.0.0' })
+    },
+  }))
+  port.define('x', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.use('c')
+    },
+  }))
+  port.define('r', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.use('a')
+      ctx.use('b')
+      // last-wins 接管 c：这会级联触发 x 的暂停/恢复，属于第二级任务
+      ctx.provide('c', { v: 'from-r' }, { conflict: 'last-wins' })
+    },
+  }))
+  port.define('a', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.provide('a', {})
+    },
+  }))
+  port.define('b', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.provide('b', {})
+    },
+  }))
+
+  const host = hostFor(port)
+  try {
+    await host.load(makeEntry('q'))
+    await host.load(makeEntry('x', { dependencies: { c: '*' } }))
+    await host.load(makeEntry('r', { dependencies: { a: '*', b: '*' } }))
+    await host.load(makeEntry('a'))
+    await host.settle()
+    assert.equal(host.view('r')?.state, 'paused', 'r 应停在 paused 等 b')
+
+    await host.load(makeEntry('b'))
+    await host.settle()
+    assert.equal(host.queueDepth, 0, 'settle() 必须等到包括二级级联在内的队列排空')
+    assert.equal(host.view('x')?.state, 'active', 'x 应已拿到 r 接管后的 c 并恢复 active')
+    assert.equal(host.registry.providerInfo('c')?.owner, 'r')
+  } finally {
+    await host.dispose()
+  }
+})

@@ -45,6 +45,8 @@ export class EffectStack implements Disposable {
   readonly #opts: EffectStackOptions
   #seq = 0
   #state: 'open' | 'draining' | 'closed' = 'open'
+  /** 正在进行的整栈回收；并发 dispose() 必须复用同一条，而不是再起一条并发回收链。 */
+  #drainPromise: Promise<void> | undefined
   #skippedByBudget = 0
 
   constructor(options: EffectStackOptions = {}) {
@@ -84,16 +86,25 @@ export class EffectStack implements Disposable {
    */
   add(teardown: Teardown, label?: string): Disposable {
     const entry: Entry = { id: ++this.#seq, label: label ?? this.#opts.label, teardown }
-    if (this.#state !== 'open') {
+    if (this.#state === 'closed') {
       void this.#run(entry)
       return NOOP
     }
+    // open 与 draining 都入栈：draining 期间若直接 #run，会与当前 teardown 并发，
+    // 破坏 I2 串行；入栈后由正在排空的循环按 LIFO 接着处理。
     this.#entries.push(entry)
     return {
       dispose: (): void => {
         // 提前撤销 = **立刻执行**这项逆操作，而不是把它从队列里摘掉就完事。
         // 幂等性由 remove() 保证：命中过一次之后就不再重复执行。
-        if (this.remove(entry.id)) void this.#run(entry)
+        if (!this.remove(entry.id)) return
+        if (this.#state === 'draining') {
+          // 正在排空：放回队列交给 drain 循环（当前 teardown 结束后按 LIFO 执行），
+          // 避免与当前 teardown 并发 —— 这也属于 I2。
+          this.#entries.push(entry)
+          return
+        }
+        void this.#run(entry)
       },
     }
   }
@@ -142,10 +153,26 @@ export class EffectStack implements Disposable {
     return true
   }
 
-  /** LIFO 逆序回收，串行 await。幂等：重复调用即刻返回。 */
+  /**
+   * LIFO 逆序回收，串行 await。幂等：重复调用（包括并发调用）返回同一次回收。
+   *
+   * 审计复现过并发 `dispose()` 会各起一条循环，teardown 交错成
+   * `B:start, A:start, B:end, A:end`，破坏 ADR-0004 I2。这里用 `#drainPromise`
+   * 保证只有一条回收链；`#drain` 开头先让出一个微任务，确保字段已赋值。
+   */
   async dispose(): Promise<void> {
     if (this.#state === 'closed') return
+    if (this.#drainPromise !== undefined) return await this.#drainPromise
     this.#state = 'draining'
+    this.#drainPromise = this.#drain()
+    await this.#drainPromise
+  }
+
+  async #drain(): Promise<void> {
+    // 让出一次微任务：赋值完成后才会真正执行 teardown，于是 teardown 里同步再调
+    // dispose() 也会命中同一个 in-flight promise，而不是再起一条并发链。
+    await Promise.resolve()
+
     const budgetMs = this.#opts.disposeBudgetMs
     const deadline = budgetMs !== undefined && budgetMs > 0 ? Date.now() + budgetMs : undefined
     while (this.#entries.length > 0) {

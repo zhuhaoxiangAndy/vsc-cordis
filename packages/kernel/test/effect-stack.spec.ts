@@ -38,6 +38,60 @@ test('I2：异步 teardown 串行执行（不是并发）', async () => {
   assert.deepEqual(events, ['start-b', 'end-b', 'start-a', 'end-a'])
 })
 
+test('I2：并发 dispose() 共享同一次回收，teardown 不交错', async () => {
+  const events: string[] = []
+  const stack = new EffectStack()
+  stack.add(async () => {
+    events.push('a:start')
+    await tick(10)
+    events.push('a:end')
+  }, 'a')
+  stack.add(async () => {
+    events.push('b:start')
+    await tick(1)
+    events.push('b:end')
+  }, 'b')
+
+  await Promise.all([stack.dispose(), stack.dispose()])
+
+  // 修复前两次 dispose 各起一条循环，事件会交错成 b:start, a:start, b:end, a:end
+  assert.deepEqual(events, ['b:start', 'b:end', 'a:start', 'a:end'])
+  assert.equal(stack.closed, true)
+})
+
+test('I2：draining 期间 add() 不得与当前 teardown 并发，而应排队回收', async () => {
+  const events: string[] = []
+  const stack = new EffectStack()
+  stack.add(async () => {
+    events.push('a:start')
+    stack.add(() => void events.push('late:run'), 'late')
+    await tick(5)
+    events.push('a:end')
+  }, 'a')
+
+  await stack.dispose()
+
+  // 修复前 draining 期间 add 会立即 #run，late:run 会插在 a:end 之前
+  assert.deepEqual(events, ['a:start', 'a:end', 'late:run'])
+  assert.equal(stack.size, 0)
+})
+
+test('I2：draining 期间 handle.dispose() 也不插队，等当前 teardown 结束后执行', async () => {
+  const events: string[] = []
+  const stack = new EffectStack()
+  stack.add(async () => {
+    events.push('a:start')
+    const late = stack.add(() => void events.push('late:run'), 'late')
+    late.dispose()
+    await tick(5)
+    events.push('a:end')
+  }, 'a')
+
+  await stack.dispose()
+
+  assert.deepEqual(events, ['a:start', 'a:end', 'late:run'])
+})
+
 test('I3：单个 teardown 抛错不阻断其余回收', async () => {
   const failures: (string | undefined)[] = []
   const order: string[] = []
