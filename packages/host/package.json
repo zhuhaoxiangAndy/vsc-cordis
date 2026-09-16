@@ -1,0 +1,68 @@
+{
+  "name": "vscordis",
+  "displayName": "VSCordis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cordis-style plugin runtime for VSCode: dynamic load / unload / hot reload with reactive dependency injection",
+  "publisher": "vscordis-dev",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhuhaoxiangAndy/vsc-cordis.git"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": ["Other"],
+  "main": "./dist/extension.cjs",
+  "browser": "./dist/web/extension.cjs",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "vscordis.runPluginCommand", "title": "vscordis: 运行插件命令…", "category": "VSCordis" },
+      { "command": "vscordis.loadPlugin", "title": "vscordis: 加载插件…", "category": "VSCordis" },
+      { "command": "vscordis.unloadPlugin", "title": "vscordis: 卸载插件…", "category": "VSCordis" },
+      { "command": "vscordis.reloadPlugin", "title": "vscordis: 重载插件…", "category": "VSCordis" },
+      { "command": "vscordis.unloadAll", "title": "vscordis: 卸载全部插件", "category": "VSCordis" },
+      { "command": "vscordis.showStatus", "title": "vscordis: 显示运行时状态", "category": "VSCordis" }
+    ],
+    "configuration": {
+      "title": "VSCordis",
+      "properties": {
+        "vscordis.pluginRoots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "额外的插件搜索根目录（绝对路径）。每个子目录需包含 plugin.json。工作区的 .vscordis/plugins 与 globalStorage 会自动搜索。"
+        },
+        "vscordis.autoLoad": {
+          "type": "boolean",
+          "default": true,
+          "description": "宿主启动后自动加载发现到的插件。"
+        },
+        "vscordis.disposeTimeoutMs": {
+          "type": "number",
+          "default": 2000,
+          "description": "单个副作用（effect）回收的超时时间；超时记入错误但继续回收。"
+        },
+        "vscordis.unloadBeforeReload": {
+          "type": "boolean",
+          "default": true,
+          "description": "重载前先完全卸载（保证无残留）；关闭可换取更快的重载速度。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build.mjs"
+  },
+  "dependencies": {
+    "@vscordis/kernel": "workspace:*",
+    "@vscordis/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/vscode": "^1.95.0",
+    "esbuild": "^0.24.0"
+  }
+}

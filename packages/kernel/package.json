@@ -1,0 +1,16 @@
+{
+  "name": "@vscordis/kernel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "vscordis runtime kernel: EffectStack / ServiceRegistry / PluginHost (zero vscode dependency)",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@vscordis/sdk": "workspace:*"
+  }
+}
