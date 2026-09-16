@@ -1579,6 +1579,134 @@ test('ADR-0019：last-wins 换人后，旧代理必须响亮失败而不是静�
   }
 })
 
+// ————————————————————————————————— ADR-0019 能力矩阵：跨模式后果
+
+test('ADR-0019：同进程提供者无法被隔离消费者取用 —— 响亮失败并给出两条出路', async () => {
+  const hostApi = new FakeHostApi()
+  const consumer = await makeFixture(
+    'inproc-target-consumer',
+    `module.exports = {
+       activate: async (ctx) => {
+         await ctx.async.useService('clock')
+       },
+     }\n`,
+    { dependencies: { clock: '^1.0.0' } },
+  )
+
+  const { host, loader } = await makeHost(hostApi)
+  try {
+    // 直接在注册表里放一个 remote=false 的提供者：等价于同进程（trusted）插件提供的服务
+    host.registry.provide('trusted-inproc-provider', 'clock', { now: () => 'live' }, { version: '1.0.0' })
+
+    await assert.rejects(host.load(consumer), (error: unknown) => {
+      const text = String(error)
+      assert.match(text, /同进程/)
+      // 两条出路都要写清楚：只告诉用户"不行"是半个答案
+      assert.match(text, /把提供者也改成 trust: untrusted/)
+      assert.match(text, /让消费者改用 trust: trusted/)
+      return true
+    })
+    await host.settle()
+    assert.equal(host.view('inproc-target-consumer')?.state, 'failed')
+
+    // 终态是 failed（不是 paused）：paused 意味着"等提供者回来"，
+    // 而同进程提供者永远不会变成可跨进程取用的形态。
+    for (let attempt = 0; attempt < 40 && loader.activeSessions > 0; attempt += 1) {
+      await sleep(25)
+    }
+    assert.equal(loader.activeSessions, 0, '取用被拒绝后子进程必须退出，不能挂着')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：同进程提供者以 last-wins 接管远程服务后，隔离消费者恢复时响亮失败', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture('cross-remote-provider', CLOCK_PROVIDER)
+  const consumer = await makeFixture('cross-mode-consumer', CLOCK_CONSUMER, {
+    permissions: ['vscode:commands.register'],
+    dependencies: { clock: '^1.0.0' },
+  })
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(provider)
+    await host.load(consumer)
+    await host.settle()
+    assert.equal(
+      await hostApi.executeCommand('cross-mode-consumer', 'svc.now', []),
+      'now-from-provider-child',
+    )
+
+    // 同进程提供者以 last-wins 接管：注册表里换成 remote=false 的活对象
+    const takeover = host.registry.provide(
+      'trusted-takeover',
+      'clock',
+      { now: async () => 'from-trusted' },
+      { version: '1.0.0', conflict: 'last-wins' },
+    )
+    await host.settle()
+
+    // 消费者被级联暂停后尝试恢复 → 在取用点再次撞上"同进程提供者"的拒绝 → failed
+    const view = host.view('cross-mode-consumer')
+    assert.equal(view?.state, 'failed', `诊断：state=${view?.state} error=${view?.error ?? '-'}`)
+    assert.match(view?.error ?? '', /同进程/)
+    assert.match(view?.error ?? '', /trust: trusted/)
+
+    const info = host.registry.providerInfo('clock')
+    assert.equal(info?.owner, 'trusted-takeover')
+    assert.equal(info?.remote, false, '接管者是同进程的，注册表必须如实标记')
+
+    // 撤销接管者：被替换的远程提供者**不会**自动复位（与同进程 last-wins 的语义一致）
+    takeover.dispose()
+    await host.settle()
+    assert.equal(host.registry.canResolve('clock'), false)
+    assert.equal(host.view('cross-remote-provider')?.state, 'active', '被替换者仍活着，但不会自动复位')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：隔离提供者可以 last-wins 接管同进程提供者（消费者走异步面可用）', async () => {
+  const hostApi = new FakeHostApi()
+  const provider = await makeFixture(
+    'cross-reverse-provider',
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('clock', { now: () => 'from-isolated' }, { version: '1.0.0', conflict: 'last-wins' })
+       },
+     }\n`,
+  )
+  const consumer = await makeFixture('cross-reverse-consumer', CLOCK_CONSUMER, {
+    permissions: ['vscode:commands.register'],
+    dependencies: { clock: '^1.0.0' },
+  })
+
+  const { host } = await makeHost(hostApi)
+  try {
+    // 先放一个同进程提供者（remote=false），再由隔离提供者显式接管
+    host.registry.provide('trusted-original', 'clock', { now: () => 'from-trusted' }, { version: '1.0.0' })
+    await host.load(provider)
+    await host.settle()
+
+    const info = host.registry.providerInfo('clock')
+    assert.equal(info?.owner, 'cross-reverse-provider')
+    assert.equal(info?.remote, true, '隔离提供者接管后必须标记为远程')
+
+    await host.load(consumer)
+    await host.settle()
+    assert.equal(
+      await hostApi.executeCommand('cross-reverse-consumer', 'svc.now', []),
+      'from-isolated',
+    )
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
 test('M4c：未声明 configuration 的隔离插件读配置只拿默认值（并说明要声明）', async () => {
   const hostApi = new FakeHostApi()
   hostApi.config.set('cfg-lab.greeting', 'should-not-be-visible')
