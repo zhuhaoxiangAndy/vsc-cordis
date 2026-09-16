@@ -70,6 +70,11 @@
           "type": "boolean",
           "default": true,
           "description": "对 untrusted 插件使用 Node 权限模型（--permission）。关闭后文件系统与子进程不再被强制拦截，隔离强度降级为「无 vscode 模块 + 受控 RPC」——仅在当前 VSCode/Electron 组合不支持该标志时才关闭（见 ADR-0013）。"
+        },
+        "vscordis.isolation.inheritEnv": {
+          "type": "boolean",
+          "default": false,
+          "description": "隔离子进程是否继承宿主的完整环境变量。默认 false：只传系统启动所需的白名单（PATH/SystemRoot/TEMP 等），避免把 token、代理凭据、agent socket 暴露给 untrusted 插件。仅在插件确实需要自定义环境变量时开启；开启后隔离强度下降（见 ADR-0021）。"
         }
       }
     }

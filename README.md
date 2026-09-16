@@ -170,6 +170,7 @@ vscordis 依赖图：4 个插件，1 个服务
 | `vscordis.activationTimeoutMs` | 15000 | `activate()` 的时限（活性保护：串行队列下没有它会被一个挂死的插件永久卡住，ADR-0015） |
 | `vscordis.hotReload` / `vscordis.hotReloadDebounceMs` | true / 150 | 文件监听热重载开关与防抖窗口（ADR-0011） |
 | `vscordis.isolation.permissionModel` | true | untrusted 插件是否启用 Node 权限模型；**这是隔离方案里唯一未在真实 VSCode 实测过的假设**，降级后果见 `docs/acceptance-m4b.md` |
+| `vscordis.isolation.inheritEnv` | false | 隔离子进程是否继承宿主完整环境变量；默认只传系统白名单，避免把 token/代理凭据/agent socket 暴露给 untrusted 插件（ADR-0021）。仅在插件确实需要自定义 env 时开启 |
 
 ## 能力矩阵（诚实版）
 

@@ -7,6 +7,7 @@ import { build, stop } from 'esbuild'
 import { PluginHost, ServiceRegistry, type HostPort, type PluginEntry } from '@vscordis/kernel'
 import type { LogLevel, Permission, PluginVscodeApi } from '@vscordis/sdk'
 import { IsolatedPluginLoader, type IsolatedHostApi } from '../src/isolation/isolated-loader.ts'
+import { buildIsolatedChildEnv } from '../src/isolation/environment.ts'
 import { buildExecArgv } from '../src/isolation/permissions.ts'
 import type { SerializedSaveEvent, SerializedWorkspaceFolder } from '../src/isolation/protocol.ts'
 
@@ -344,7 +345,7 @@ after(async () => {
 
 async function makeHost(
   hostApi: FakeHostApi,
-  overrides: { readonly disposeBudgetMs?: number } = {},
+  overrides: { readonly disposeBudgetMs?: number; readonly inheritEnv?: boolean } = {},
 ): Promise<{ host: PluginHost; loader: IsolatedPluginLoader }> {
   const workerPath = await ensureWorker()
   // 注册表必须由测试显式创建并与 PluginHost **共用**：隔离加载器要往同一张表里
@@ -358,6 +359,7 @@ async function makeHost(
     readyTimeoutMs: 15_000,
     disposeTimeoutMs: 3_000,
     disposeBudgetMs: overrides.disposeBudgetMs ?? 0,
+    inheritEnv: overrides.inheritEnv ?? false,
   })
   const port = new IsolationPort(loader)
   const host = new PluginHost({
@@ -408,6 +410,24 @@ test('buildExecArgv：关闭权限模型时给出明确的降级说明', () => {
   })
   assert.deepEqual(plan.execArgv, [])
   assert.match(plan.warnings.join('\n'), /隔离强度降级/)
+})
+
+test('环境变量：默认只传白名单，inheritEnv=true 才完整继承（ADR-0021）', () => {
+  const previous = process.env.VSCORDIS_ENV_PROBE
+  process.env.VSCORDIS_ENV_PROBE = 'HOST_SECRET_VALUE'
+  try {
+    const filtered = buildIsolatedChildEnv(false)
+    assert.equal(filtered.VSCORDIS_ENV_PROBE, undefined)
+    assert.equal(filtered.ELECTRON_RUN_AS_NODE, '1')
+    if (typeof process.env.PATH === 'string') assert.equal(filtered.PATH, process.env.PATH)
+
+    const inherited = buildIsolatedChildEnv(true)
+    assert.equal(inherited.VSCORDIS_ENV_PROBE, 'HOST_SECRET_VALUE')
+    assert.equal(inherited.ELECTRON_RUN_AS_NODE, '1')
+  } finally {
+    if (previous === undefined) delete process.env.VSCORDIS_ENV_PROBE
+    else process.env.VSCORDIS_ENV_PROBE = previous
+  }
 })
 
 // ————————————————————————————————— 端到端：真实子进程
@@ -597,6 +617,53 @@ test('隔离边界：指向插件目录内部的链接不误伤（ADR-0020）', 
   } finally {
     await host.unload('junction-inside')
     await host.settle()
+  }
+})
+
+test('环境变量：实际 fork 默认不继承宿主敏感变量，inheritEnv=true 才继承（ADR-0021）', async () => {
+  const previous = process.env.VSCORDIS_ENV_PROBE
+  process.env.VSCORDIS_ENV_PROBE = 'HOST_SECRET_VALUE'
+  try {
+    const source = `module.exports = {
+      activate(ctx) {
+        ctx.log.info('env-probe:' + String(process.env.VSCORDIS_ENV_PROBE ?? '<missing>'))
+      },
+    }\n`
+
+    const offApi = new FakeHostApi()
+    const offEntry = await makeFixture('env-inherit-off', source)
+    const { host: offHost } = await makeHost(offApi)
+    try {
+      await offHost.load(offEntry)
+      await offHost.settle()
+      await sleep(100)
+      assert.ok(
+        offApi.logs.some((log) => log.message.includes('env-probe:<missing>')),
+        '默认白名单不得把 VSCORDIS_ENV_PROBE 传给子进程',
+      )
+    } finally {
+      await offHost.unload('env-inherit-off')
+      await offHost.settle()
+    }
+
+    const onApi = new FakeHostApi()
+    const onEntry = await makeFixture('env-inherit-on', source)
+    const { host: onHost } = await makeHost(onApi, { inheritEnv: true })
+    try {
+      await onHost.load(onEntry)
+      await onHost.settle()
+      await sleep(100)
+      assert.ok(
+        onApi.logs.some((log) => log.message.includes('env-probe:HOST_SECRET_VALUE')),
+        'inheritEnv=true 时必须完整继承（逃生开关）',
+      )
+    } finally {
+      await onHost.unload('env-inherit-on')
+      await onHost.settle()
+    }
+  } finally {
+    if (previous === undefined) delete process.env.VSCORDIS_ENV_PROBE
+    else process.env.VSCORDIS_ENV_PROBE = previous
   }
 })
 

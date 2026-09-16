@@ -97,6 +97,9 @@ export class Runtime {
       usePermissionModel: vscode.workspace
         .getConfiguration('vscordis')
         .get<boolean>('isolation.permissionModel', true),
+      inheritEnv: vscode.workspace
+        .getConfiguration('vscordis')
+        .get<boolean>('isolation.inheritEnv', false),
       onLog: (message) => this.bridge.log('debug', message),
     })
     this.#isolatedLoader = isolatedLoader

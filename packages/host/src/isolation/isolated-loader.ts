@@ -4,6 +4,7 @@ import { PermissionDeniedError, ServiceRegistry, ServiceUnavailableError, descri
 import type { EffectScopeApi } from '@vscordis/sdk'
 import { PluginIntegrityError, verifyPluginArtifact } from '../integrity.ts'
 import { assertNoEscapingReparsePoints } from '../paths.ts'
+import { buildIsolatedChildEnv } from './environment.ts'
 import { buildExecArgv, toIsolatedPermissions, type ExecArgvPlan } from './permissions.ts'
 import {
   PROTOCOL_VERSION,
@@ -120,6 +121,12 @@ export interface IsolatedLoaderOptions {
    */
   readonly disposeBudgetMs?: number
   readonly usePermissionModel?: boolean
+  /**
+   * 隔离子进程是否继承宿主的完整环境变量（ADR-0021）。
+   * 默认 `false`：只传系统启动所需的白名单，避免把 token/代理凭据/agent socket 等
+   * 暴露给 untrusted 插件。显式设为 `true` 才完整继承，并会在日志里给出降级警告。
+   */
+  readonly inheritEnv?: boolean
   readonly onLog?: (message: string) => void
   /** 测试可注入，用来断言 execArgv 的推导结果。 */
   readonly execArgvFor?: (entry: PluginEntry, permissions: ReadonlySet<Permission>) => ExecArgvPlan
@@ -386,6 +393,13 @@ export class IsolatedPluginLoader {
       })
     for (const warning of plan.warnings) this.#log(`[${pluginId}] ${warning}`)
 
+    if (this.#options.inheritEnv === true) {
+      this.#log(
+        `[${pluginId}] 已开启 vscordis.isolation.inheritEnv：隔离子进程继承宿主完整环境变量，` +
+          '可能包含 token/代理凭据等敏感值，隔离强度下降（ADR-0021）。',
+      )
+    }
+
     // Node 权限模型不解析 reparse point：先把“指向 root 外”的 symlink/junction 拒掉，
     // 而且必须发生在 fork 之前（ADR-0020）。permissionModel=false 时 execArgv 为空，
     // 用户已经显式接受“没有强制 fs 边界”，不做这项扫描。
@@ -414,6 +428,7 @@ export class IsolatedPluginLoader {
           readyTimeoutMs: this.#options.readyTimeoutMs ?? 10_000,
           disposeTimeoutMs: this.#options.disposeTimeoutMs ?? 2_000,
           disposeBudgetMs: this.#options.disposeBudgetMs ?? 0,
+          inheritEnv: this.#options.inheritEnv ?? false,
           log: (message) => this.#log(message),
         })
         ref.session = session
@@ -472,6 +487,8 @@ interface SessionOptions {
   readonly disposeTimeoutMs: number
   /** 整栈回收总预算；`0` = 不设（随 activate 消息下发给子进程的 EffectStack）。 */
   readonly disposeBudgetMs: number
+  /** 是否完整继承宿主 env；见 `IsolatedLoaderOptions.inheritEnv`（ADR-0021）。 */
+  readonly inheritEnv: boolean
   readonly log: (message: string) => void
 }
 
@@ -571,9 +588,10 @@ class IsolatedSession {
   async start(): Promise<void> {
     const child = fork(this.#options.workerPath, [], {
       execArgv: [...this.#options.plan.execArgv],
-      // VSCode 宿主跑在 Electron 里：不设这个变量，fork 会去启动一个完整的 Electron 应用而不是 Node。
-      // 在纯 Node 下它是无害的。
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      // VSCode 宿主跑在 Electron 里：必须设 ELECTRON_RUN_AS_NODE=1，否则 fork 会去启动一个
+      // 完整的 Electron 应用而不是 Node。默认只传系统白名单，避免把宿主敏感 env 暴露给
+      // untrusted 插件；用户显式开启 vscordis.isolation.inheritEnv 时才完整继承（ADR-0021）。
+      env: buildIsolatedChildEnv(this.#options.inheritEnv),
       // structured clone：至少能保住 undefined / Date / Map / Set（默认的 JSON 序列化会丢）
       serialization: 'advanced',
       silent: true,

@@ -34,6 +34,7 @@
 | `vscordis.disposeTimeoutMs` | `2000` | 单个副作用回收的超时 |
 | `vscordis.activationTimeoutMs` | `15000` | 插件 `activate()` 的时限（没有它，一个挂死的插件会冻结整个宿主） |
 | `vscordis.isolation.permissionModel` | `true` | 对 `untrusted` 插件使用 Node 权限模型（`--permission`） |
+| `vscordis.isolation.inheritEnv` | `false` | 隔离子进程是否继承宿主完整环境变量；默认只传系统白名单（ADR-0021） |
 
 ## 开发
 

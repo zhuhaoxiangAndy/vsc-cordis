@@ -40,6 +40,10 @@
 
 ### 修复
 
+- **隔离子进程默认不再继承宿主的完整 env**：原先 `{ ...process.env }` 会把 token、代理凭据、
+  `SSH_AUTH_SOCK` 等暴露给 `untrusted` 插件；现在默认只传系统启动白名单，新增
+  `vscordis.isolation.inheritEnv`（默认 `false`）作为逃生开关，开启时每个插件加载都会写降级日志。
+  见 ADR-0021。
 - **隔离边界可被插件根内的 junction/symlink 绕过**：Node `--permission --allow-fs-read=<pluginRoot>`
   只限制路径字符串、不解析链接；实测 root 内 junction 可读到 root 外文件。现在 fork 前递归扫描
   插件目录，任何链接的 `realpath` 落在 root 外都 fail-closed（`PluginReparsePointError` →
@@ -64,6 +68,8 @@
 
 ### 测试
 
+- 新增 ADR-0021 回归：env 白名单单元测试 + 真实子进程验证（默认看不到宿主变量，
+  `inheritEnv=true` 时能看到）。
 - 新增 ADR-0020 回归：外部 junction 必须在 fork 前拒绝（`sessionsStarted === 0` 哨兵），
   root 内 junction 不误伤。
 - **稳定性（flake hunt）**：完整套件连续 3 次全绿 —— 258 项（257 通过 + 1 个 `--expose-gc` 严格用例
