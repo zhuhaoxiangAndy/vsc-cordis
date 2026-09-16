@@ -1,0 +1,18 @@
+feat(kernel): EffectStack/ServiceRegistry/PluginHost 与 51 项测试
+
+@vscordis/kernel：零 vscode、零 Node 内建依赖的运行时内核，可在纯 Node 与 Web Worker 中运行。
+
+- EffectStack：四条不变式（注册即入栈 / 严格 LIFO 串行 await / 失败隔离 /
+  闭栈后登记立即回收）。三条不变式都有对应测试，包括 effectAsync 在卸载期间
+  完成建资源的竞态。
+- ServiceRegistry：键为**服务名**而非插件 id（提供者可替换）；冲突默认 exclusive；
+  依赖边 + 硬依赖传递闭包（供诊断与事件通知）；revoke 时清理空槽位。
+- PluginHost：状态机 idle/loading/active/paused/failed/unloading + 全局串行队列；
+  依赖变化事件被投递到队列尾部再处理，保证「提供者彻底卸载完毕 → 消费者才开始暂停」。
+  传递闭包级联**没有任何特判代码**——它是「服务的生命周期挂在 EffectStack 上」的
+  自然结果：B 暂停时它的 provide('scheduler') 作为 B 栈上的一项 effect 被回收，C 随之暂停。
+- fail-closed：trust 为 untrusted 且宿主无隔离后端时拒绝加载，绝不降级为同进程执行。
+
+开发期验证：node --test（Node 原生类型剥离，零依赖、零网络）。51 项测试全绿，
+覆盖 LIFO 顺序、串行性、超时、闭栈竞态、级联暂停/恢复、activate 回滚、
+权限拒绝、以及桥接层自动登记安全网（插件漏写 ctx.effect 也不泄漏）。

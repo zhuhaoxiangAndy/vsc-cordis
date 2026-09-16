@@ -1,0 +1,23 @@
+{
+  "name": "vsc-cordis",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cordis-style plugin runtime (effect stack + reactive DI) running on top of the VSCode extension host",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "node --test \"packages/*/test/*.spec.ts\"",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "build": "node scripts/build.mjs",
+    "check": "npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/vscode": "^1.95.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.2"
+  }
+}

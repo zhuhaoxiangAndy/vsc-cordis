@@ -1,0 +1,10 @@
+{
+  "name": "vscordis-plugin-hello",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M1 PoC plugin: registers commands and an output channel through the controlled context",
+  "dependencies": {
+    "@vscordis/sdk": "workspace:*"
+  }
+}

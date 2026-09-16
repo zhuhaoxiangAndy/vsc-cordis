@@ -1,0 +1,15 @@
+node_modules/
+dist/
+out/
+*.vsix
+.vscordis-cache/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+# 私钥绝不入库（见 docs/adr/0008-secret-management.md）
+*.key
+*.pem
+.keys/
+.env
+.env.*

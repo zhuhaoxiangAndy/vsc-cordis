@@ -1,0 +1,20 @@
+chore: 初始化 monorepo 骨架与架构决策记录
+
+建立 pnpm workspace 分层：@vscordis/sdk（契约）/ @vscordis/kernel（实现）/
+vscordis（宿主扩展，唯一发布单元）/ plugins（示例插件）。
+
+同时固化 9 条 ADR，其中两条是本轮由一手证据推翻的原始假设：
+
+- ADR-0002：运行时注册的命令**不进命令面板**。面板条目来自静态 contributes.commands
+  写入的 MenuRegistry implicit item，registerCommand 从不进入 MenuRegistry；
+  dispose() 只让它从 CommandsRegistry（= getCommands(true)）消失。
+  因此里程碑 1 的验收判据改为「getCommands(true) 中消失 + QuickPick 代理列表中消失」。
+- ADR-0003：扩展宿主会把 vscode 模块注入给扩展目录下的任何模块
+  （extHostRequireInterceptor 全局 patch module._load），因此同进程只能"防误用"、
+  不能防恶意；不可信插件必须走子进程，且缺隔离后端时 fail-closed 拒绝加载。
+
+其余决策：ADR-0001 分层与依赖倒置；ADR-0004 EffectStack 严格 LIFO 串行语义
+（与 cordis fiber 顶层 Promise.all 并发的有意分歧）；ADR-0005 权限模型及
+"net 无子开关、无法由 Node 强制"的缺口；ADR-0006 Web 宿主降级（浏览器无法运行期加载代码）；
+ADR-0007 依赖协调与级联；ADR-0008 密钥与签名材料存放；ADR-0009 工具链选 Node 内置
+test runner + 原生类型剥离，以保证零网络可验证。

@@ -1,0 +1,9 @@
+chore: 合并 kernel 基线（M1/M2 内核）
+
+里程碑分支 feat/kernel-baseline 完成，合并回 main。
+
+本里程碑交付：@vscordis/sdk 契约层（PluginContext / CordisPlugin / plugin.json /
+权限子集与受控 VSCode API 类型）与 @vscordis/kernel 运行时内核
+（EffectStack / ServiceRegistry / PluginHost），51 项单元测试全绿。
+
+尚未交付（下一里程碑）：vscordis 宿主扩展、示例插件、热重载。

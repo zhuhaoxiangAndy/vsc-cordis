@@ -1,0 +1,10 @@
+{
+  "name": "vscordis-plugin-provider-clock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M2 demo: provides the 'clock' service and consumes nothing",
+  "dependencies": {
+    "@vscordis/sdk": "workspace:*"
+  }
+}

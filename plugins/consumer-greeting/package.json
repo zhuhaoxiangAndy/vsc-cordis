@@ -1,0 +1,10 @@
+{
+  "name": "vscordis-plugin-consumer-greeting",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M2 demo: consumes the 'clock' service; pauses when the provider unloads and resumes when it returns",
+  "dependencies": {
+    "@vscordis/sdk": "workspace:*"
+  }
+}
