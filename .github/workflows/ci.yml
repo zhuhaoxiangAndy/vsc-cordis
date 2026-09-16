@@ -36,7 +36,17 @@ jobs:
       - name: 产物契约冒烟
         run: pnpm run smoke
 
+      # 打包 + 校验真实 VSIX（读 ZIP 中央目录断言必需项在、源码/依赖不在）。
+      # 这一步同时验证了 .vscodeignore 与扩展清单在 vsce 眼里是合法的。
+      - name: 打包并校验 VSIX
+        run: pnpm run verify:release
+
       # 说明（用户决策）：不跑 @vscode/test-electron e2e。
       # 桥接层（bridge.ts）因此只能靠 tsc + 手动验收覆盖，见 docs/acceptance-m1-m2.md。
       - name: 提示未覆盖范围
         run: echo "bridge.ts 需要真实 vscode 模块，仅由 tsc 与手动验收覆盖"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscordis-vsix
+          path: vscordis-local.vsix

@@ -47,6 +47,28 @@ pnpm run watch                     # 终端 A：esbuild 监听插件源码 → �
 
 `Ctrl+Shift+P` 输入 `VSCordis` 可见 6 个入口命令。
 
+## 打包（本地 VSIX）
+
+```bash
+pnpm run verify:release            # 生产构建 → vsce 打包 → 校验真实 VSIX
+code --install-extension vscordis-local.vsix    # 装进你自己的 VSCode
+```
+
+打包用官方的 **`@vscode/vsce`**（devDependency），理由是 VSIX 格式的权威实现就是它 ——
+自写一个"能被解压工具打开"的 ZIP 只能证明 ZIP 合法，证明不了 VSCode 会接受它；
+而且 vsce 会顺带校验扩展清单（能抓出 `browser` 指向不存在文件这类问题）。
+
+`pnpm run verify:package` 校验的是**真实产物**：直接读 VSIX 的 ZIP 中央目录，
+断言 `dist/extension.cjs`、`dist/isolated-worker.cjs`、`dist/web/extension.js`、
+`keys/*.pub.pem`、`package.json` 都在，且源码 / 测试 / `node_modules` / sourcemap 都不在。
+刻意不去自己实现一遍 ignore 语义再断言 —— 那只证明"我的实现和我的理解一致"。
+
+生产构建的 VSIX 约 **34 KB**（开发构建约 209 KB，差在 sourcemap 与压缩）。
+`packages/host/.vscodeignore` 的取舍写在文件注释里。
+
+> 打包时会提示 `LICENSE ... not found`。这是 vsce 为**发布到市场**做的检查，
+> 而发布到市场是你明确划出的红线；仓库根目录已有 MIT LICENSE，此处不复制作第二份以免漂移。
+
 ## 签名（M4a）
 
 ```bash

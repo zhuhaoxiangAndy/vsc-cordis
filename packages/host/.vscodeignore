@@ -1,0 +1,21 @@
+# 打 VSIX 时排除的内容。
+#
+# 原则：**只发布运行期真正需要的东西** —— dist/（已内联 kernel 与 sdk）加上 keys/（验签公钥）。
+# 宿主 bundle 由 esbuild 打成单文件，因此 node_modules 一个都不需要进包。
+#
+# 语法是 gitignore 风格（vsce 用 ignore 包实现）。
+
+# 源码与测试
+src/**
+test/**
+**/*.ts
+**/*.tsbuildinfo
+
+# 依赖（已内联进 dist）
+node_modules/**
+
+# 本文件自己不需要被打进去
+.vscodeignore
+
+# 开发期产物
+*.map

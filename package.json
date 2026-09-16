@@ -20,11 +20,15 @@
     "tree": "node packages/cli/src/bin.ts tree",
     "list": "node packages/cli/src/bin.ts list",
     "smoke": "node scripts/smoke-built-plugins.mjs",
+    "package": "cd packages/host && vsce package --no-dependencies --out ../../vscordis-local.vsix",
+    "verify:package": "node scripts/verify-vsix.mjs",
+    "verify:release": "npm run build:prod && npm run package && npm run verify:package",
     "verify": "npm run typecheck && npm run test && npm run build && npm run smoke"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
     "@types/vscode": "~1.95.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.2"
   }
