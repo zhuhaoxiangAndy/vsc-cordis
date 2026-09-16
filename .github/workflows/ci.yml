@@ -47,9 +47,11 @@ jobs:
         run: pnpm run verify:release
 
       # 说明（用户决策）：不跑 @vscode/test-electron e2e。
-      # 桥接层（bridge.ts）因此只能靠 tsc + 手动验收覆盖，见 docs/acceptance-m1-m2.md。
+      # 桥接层的**逻辑**已由 packages/host/test/bridge.spec.ts 用 vscode stub 做契约测试
+      # （权限门、命令表记账、副作用回收、只读配置视图、事件订阅）；
+      # 真实 Electron 行为（例如 --permission 是否可用）仍只能靠 docs/acceptance-quick.md 手动验收。
       - name: 提示未覆盖范围
-        run: echo "bridge.ts 需要真实 vscode 模块，仅由 tsc 与手动验收覆盖"
+        run: echo "bridge.ts 的真实 Electron 行为需要手动验收；桥接层逻辑已由 bridge.spec.ts 覆盖"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -1,7 +1,9 @@
 # 手动验收脚本（M1 / M2）
 
-自动化测试覆盖了 kernel 与加载器，但**桥接层（`packages/host/src/bridge.ts`）需要真实的 `vscode` 模块**，
-只能靠类型检查 + 下面的手动步骤覆盖。这一点不做隐瞒：本项目按用户决策不跑 `@vscode/test-electron` e2e。
+自动化测试覆盖了 kernel 与加载器；桥接层的**逻辑**（权限门、命令表记账、副作用回收、
+只读配置视图、事件订阅）已由 `packages/host/test/bridge.spec.ts` 用 `vscode` stub 做契约测试，
+但**真实宿主里的行为**（尤其是 `--permission` 是否可用）仍需要真实的 `vscode` 模块 ——
+只能靠下面的手动步骤覆盖。本项目按用户决策不跑 `@vscode/test-electron` e2e。
 
 ## 准备
 

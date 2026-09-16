@@ -101,15 +101,31 @@ export class VscodeBridge implements HostPort {
         return (fn as (...inner: unknown[]) => unknown)(...args)
       }) as unknown as T
 
-    /** 包装一个"会注册资源"的 API：自动登记逆操作，并把 dispose 变成幂等。 */
-    const track = <T>(permission: Permission, call: string, create: () => vscode.Disposable): T => {
+    /**
+     * 包装一个"会注册资源"的 API：自动登记逆操作，并把 dispose 变成幂等。
+     *
+     * `onRelease` 用来把**同一份释放路径**同时用于"插件提前 dispose"与"EffectStack 回收"——
+     * 两处分开写就是两处漂移的起点（命令表清理曾经只在卸载时发生）。
+     */
+    const track = <T>(
+      permission: Permission,
+      call: string,
+      create: () => vscode.Disposable,
+      onRelease?: () => void,
+    ): T => {
       allow(call, permission)
       const raw = create()
+      // ⚠️ 必须先抓住**原始** dispose：下面会把它覆盖成 release，
+      // 否则 release 里的 `raw.dispose()` 会调用 release 自己（递归守卫直接 return），
+      // 真正的底层 dispose 永远不执行 —— 表现为"命令从 QuickPick 消失了，
+      // 但 VSCode 的命令注册表里还留着"（bridge.spec.ts 钉住了这条）。
+      const originalDispose = raw.dispose.bind(raw)
       let released = false
       const release = (): void => {
         if (released) return
         released = true
-        raw.dispose()
+        originalDispose()
+        onRelease?.()
       }
       effects.add(release, call)
       Object.defineProperty(raw, 'dispose', { value: release, configurable: true, writable: true })
@@ -119,14 +135,17 @@ export class VscodeBridge implements HostPort {
     const api = {
       commands: {
         registerCommand: ((command: string, callback: (...args: never[]) => unknown) => {
-          const disposable = track<vscode.Disposable>('vscode:commands.register', `command:${command}`, () =>
-            vscode.commands.registerCommand(command, callback as (...args: unknown[]) => unknown),
+          const disposable = track<vscode.Disposable>(
+            'vscode:commands.register',
+            `command:${command}`,
+            () => vscode.commands.registerCommand(command, callback as (...args: unknown[]) => unknown),
+            // 命令表清理与资源释放走同一条路径：插件**提前** dispose 时 QuickPick 里的条目
+            // 也要立刻消失，否则会留下一个点了报错的幽灵条目。
+            () => {
+              if (bridge.#commands.get(command) === deps.id) bridge.#commands.delete(command)
+            },
           )
           bridge.#commands.set(command, deps.id)
-          // 命令表的清理也登记为副作用：否则卸载后 QuickPick 里会留一个点了报错的幽灵条目。
-          effects.add(() => {
-            if (bridge.#commands.get(command) === deps.id) bridge.#commands.delete(command)
-          }, `command-registry:${command}`)
           return disposable
         }) as unknown as typeof vscode.commands.registerCommand,
 
@@ -172,6 +191,14 @@ export class VscodeBridge implements HostPort {
           track<vscode.OutputChannel>('vscode:window.output', `outputChannel:${name}`, () =>
             vscode.window.createOutputChannel(name),
           )) as unknown as typeof vscode.window.createOutputChannel,
+        // 活动编辑器事件挂在 window 下（与 `PluginVscodeApi.window` 的类型、子进程代理
+        // 与 kernel 同进程适配器一致）；但**读的是工作区内容**，所以权限归 workspace.read。
+        // ⚠️ 曾经错放在 workspace 下：类型断言把它藏住了，真实宿主里同进程的
+        // `ctx.async.onDidChangeActiveTextEditor` 会拿到 undefined —— 由 bridge.spec.ts 钉住。
+        onDidChangeActiveTextEditor: ((listener: (editor: vscode.TextEditor | undefined) => unknown) =>
+          track<vscode.Disposable>('vscode:workspace.read', 'onDidChangeActiveTextEditor', () =>
+            vscode.window.onDidChangeActiveTextEditor(listener),
+          )) as unknown as typeof vscode.window.onDidChangeActiveTextEditor,
       },
 
       workspace: {
@@ -200,12 +227,6 @@ export class VscodeBridge implements HostPort {
           track<vscode.Disposable>('vscode:workspace.read', 'onDidSaveTextDocument', () =>
             vscode.workspace.onDidSaveTextDocument(listener),
           )) as unknown as typeof vscode.workspace.onDidSaveTextDocument,
-        // 活动编辑器事件挂在 window 上，但**读的是工作区内容**，所以权限归 workspace.read
-        // （与保存事件一致）。事件回调参数里有 TextDocument，隔离模式无法诚实履行 → 用 ctx.async。
-        onDidChangeActiveTextEditor: ((listener: (editor: vscode.TextEditor | undefined) => unknown) =>
-          track<vscode.Disposable>('vscode:workspace.read', 'onDidChangeActiveTextEditor', () =>
-            vscode.window.onDidChangeActiveTextEditor(listener),
-          )) as unknown as typeof vscode.window.onDidChangeActiveTextEditor,
       },
 
       // 构造函数类成员是无副作用的工具，直接放行（插件需要它们来构造 Uri / 事件 / 清理器）。

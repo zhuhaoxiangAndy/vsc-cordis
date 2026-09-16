@@ -34,6 +34,14 @@
 
 ### 修复
 
+- **桥接层 `track()` 从不调用底层 `dispose`**：`release` 里的 `raw.dispose()` 已经被
+  `defineProperty` 覆盖成 `release` 本身（递归守卫直接 return），真正的注销永远不执行 ——
+  表现为"命令从 QuickPick 消失、但 VSCode 的命令注册表里还留着"。修法：先抓住原始 dispose 再覆盖。
+  同时把命令表清理并入同一条释放路径（插件**提前** dispose 时 QuickPick 也会立刻清掉）。
+- **`onDidChangeActiveTextEditor` 曾挂在 `workspace` 下**（SDK 类型约定是 `window`）：
+  `as unknown as PluginVscodeApi` 的类型断言把它藏住了，真实宿主里同进程的
+  `ctx.async.onDidChangeActiveTextEditor` 会拿到 `undefined`。
+  上面两条都是新增的桥接层契约测试（`packages/host/test/bridge.spec.ts`）抓出来的。
 - **生产路径的 `engines` 检查曾被静默跳过**：`Runtime` 没有把 `hostVersion` / `vscodeVersion`
   传给 `PluginHost`（新增接线测试守住）。见 ADR-0017。
 - **子进程异常退出时在途调用会永久挂起**：`exit` 处理器补 `#failAll`（活锁 → 明确失败）。见 ADR-0019 决策 10。
@@ -53,6 +61,10 @@
 - 新增**扇出**规模测试（1 提供者 + 300 消费者，实测约 16ms）与两条**分层不变量**元测试
   （kernel 不得 import `vscode`/`node:*`；sdk 对 `vscode` 的引用必须全为 `import type`），
   后者做过反向验证（临时注入 `node:os` 会立刻变红）。
+- 新增**桥接层契约测试**（`packages/host/test/bridge.spec.ts`，用 `module.registerHooks` 把
+  `vscode` 解析到 stub）：命令注册/注销与 QuickPick 数据源、executeCommand 权限矩阵、
+  窗口消息/状态栏/输出通道的权限与幂等 dispose、只读配置视图、事件订阅与 EffectStack 回收。
+  **边界写进文件头**：它覆盖桥接层逻辑，不替代真实 Electron 行为的手动验收。
 
 ### 文档
 
