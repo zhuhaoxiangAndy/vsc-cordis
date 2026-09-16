@@ -111,8 +111,30 @@ async function buildIsolatedWorker() {
   console.log(`[worker] ${path.relative(root, outfile)}`)
 }
 
+/**
+ * vscordis CLI。
+ *
+ * 打成 **ESM** 而不是 CJS：入口用了顶层 await 来做命令分发。
+ * `esbuild` 标为 external —— 它只被 `vscordis dev` 动态导入，不该被内联进产物。
+ */
+async function buildCli() {
+  const outfile = path.join(root, 'packages', 'cli', 'dist', 'cli.mjs')
+  mkdirSync(path.dirname(outfile), { recursive: true })
+  await build({
+    ...shared,
+    entryPoints: [path.join(root, 'packages', 'cli', 'src', 'bin.ts')],
+    outfile,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    external: ['esbuild'],
+  })
+  console.log(`[cli]    ${path.relative(root, outfile)}`)
+}
+
 await buildPlugins()
 await buildHostNode()
 await buildHostWeb()
 await buildIsolatedWorker()
+await buildCli()
 console.log(production ? '[build] 完成（production）' : '[build] 完成（development，内联 sourcemap）')

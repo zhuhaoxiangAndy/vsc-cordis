@@ -127,6 +127,7 @@ test('集成：dist 产物被重写 → fs.watch 触发计划 → 重载拿到�
       version: '1.0.0',
       main: 'dist/index.cjs',
       description: undefined,
+      provides: [],
       dependencies: {},
       permissions: [],
       trust: 'trusted',

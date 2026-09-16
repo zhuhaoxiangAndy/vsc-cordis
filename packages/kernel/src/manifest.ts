@@ -18,6 +18,8 @@ export interface NormalizedManifest {
   readonly main: string
   readonly description: string | undefined
   readonly dependencies: Readonly<Record<string, string>>
+  /** 声明的服务（供静态工具使用；运行期以 ctx.provide 为准，宿主会比对并告警，见 ADR-0014）。 */
+  readonly provides: readonly string[]
   readonly permissions: readonly string[]
   readonly trust: PluginTrust
 }
@@ -77,6 +79,8 @@ export function validateManifest(raw: unknown): ManifestValidation {
 
   const dependencies = readDependencies(record, errors)
 
+  const provides = readProvides(record, errors)
+
   const permissions = readPermissions(record, errors)
 
   const trust = readTrust(record, errors)
@@ -92,6 +96,7 @@ export function validateManifest(raw: unknown): ManifestValidation {
     main,
     description,
     dependencies,
+    provides,
     permissions,
     trust,
   }
@@ -141,6 +146,24 @@ function readDependencies(record: Record<string, unknown>, errors: string[]): Re
       continue
     }
     result[name] = range
+  }
+  return result
+}
+
+function readProvides(record: Record<string, unknown>, errors: string[]): string[] {
+  const value = record.provides
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    errors.push('provides 应为服务名字符串数组')
+    return []
+  }
+  const result: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' || !SERVICE_NAME_PATTERN.test(item)) {
+      errors.push(`provides 含非法服务名：${String(item)}`)
+      continue
+    }
+    if (!result.includes(item)) result.push(item)
   }
   return result
 }

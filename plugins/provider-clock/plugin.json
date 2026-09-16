@@ -5,5 +5,6 @@
   "description": "提供 clock 服务；卸载后消费者自动暂停，重新加载后消费者自动恢复并拿到新实例",
   "main": "dist/index.cjs",
   "trust": "trusted",
+  "provides": ["clock"],
   "permissions": ["vscode:commands.register"]
 }

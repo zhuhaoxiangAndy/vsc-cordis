@@ -160,6 +160,7 @@ async function makeFixture(
       main: 'dist/index.cjs',
       description: undefined,
       dependencies: {},
+      provides: [],
       permissions: (full.permissions ?? []) as string[],
       trust: 'untrusted',
     },

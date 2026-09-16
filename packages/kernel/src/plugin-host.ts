@@ -266,6 +266,7 @@ export class PluginHost {
       record.ctx = ctx
       await loaded.plugin.activate(ctx)
       record.missing = []
+      this.#checkProvidesDrift(record)
       this.#setState(record, 'active', reason)
     } catch (error) {
       // activate 未成功 → 不调用 deactivate（它面向"已激活"的插件），直接逆序回收已产生的副作用。
@@ -379,6 +380,29 @@ export class PluginHost {
       if (declared[name] === undefined) declared[name] = '*'
     }
     return declared
+  }
+
+  /**
+   * 比对 `plugin.json#provides` 的声明与实际提供（ADR-0014）。
+   *
+   * 为什么必须检查：声明了却不生效的字段是陷阱 —— `CordisPlugin.inject` 就吃过这个亏
+   * （ADR-0010 决策 2）。但这里只**告警不阻断**：服务是运行期决定的，
+   * 静态声明天生只能尽力而为，阻断会让一个纯工具字段变成加载门槛。
+   */
+  #checkProvidesDrift(record: PluginRecord): void {
+    const id = record.entry.manifest.id
+    const declared = new Set(record.entry.manifest.provides)
+    const actual = new Set(this.#registry.providesOf(id))
+    const declaredButNotProvided = [...declared].filter((name) => !actual.has(name))
+    const providedButNotDeclared = [...actual].filter((name) => !declared.has(name))
+    if (declaredButNotProvided.length === 0 && providedButNotDeclared.length === 0) return
+
+    this.#port.log('warn', 'provides 声明与实际不一致（只告警，不影响加载）', {
+      plugin: id,
+      declaredButNotProvided: declaredButNotProvided.join(', ') || '-',
+      providedButNotDeclared: providedButNotDeclared.join(', ') || '-',
+      hint: 'vscordis tree 的依赖图依据声明值，请保持同步',
+    })
   }
 
   #missingDependencies(record: PluginRecord): readonly ServiceName[] {

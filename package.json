@@ -16,6 +16,9 @@
     "watch": "node scripts/watch.mjs",
     "keygen": "node scripts/gen-key.mjs",
     "sign": "node scripts/sign-plugin.mjs",
+    "cli": "node packages/cli/src/bin.ts",
+    "tree": "node packages/cli/src/bin.ts tree",
+    "list": "node packages/cli/src/bin.ts list",
     "smoke": "node scripts/smoke-built-plugins.mjs",
     "verify": "npm run typecheck && npm run test && npm run build && npm run smoke"
   },

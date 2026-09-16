@@ -49,6 +49,7 @@ function entryFor(root: string, main: string, id = 'fixture'): PluginEntry {
       version: '1.0.0',
       main,
       description: undefined,
+      provides: [],
       dependencies: {},
       permissions: [],
       trust: 'trusted',
