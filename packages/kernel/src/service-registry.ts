@@ -37,8 +37,10 @@ export interface ServiceChangeEvent {
 }
 
 interface ConsumerRecord {
-  readonly kind: DependencyKind
-  readonly range: string | undefined
+  readonly hardCount: number
+  readonly softCount: number
+  readonly hardRange: string | undefined
+  readonly softRange: string | undefined
 }
 
 interface Slot {
@@ -263,13 +265,14 @@ export class ServiceRegistry {
       slot = { provider: undefined, generation: 0, consumers: new Map() }
       this.#slots.set(name, slot)
     }
-    // 同一消费者对同一服务可能先后登记 hard / soft：hard 是更强约束，不能被 soft 降级。
-    // range 也不允许 soft 覆盖已登记的 hard range（否则级联判定会看到错误的范围）。
+    // 同一消费者对同一服务可能先后登记 hard / soft，甚至多次登记；按 kind 引用计数，
+    // 任一 edge 提前 dispose 只能减自己的计数，不能把另一条边一起删掉。
     const previous = slot.consumers.get(consumer)
-    const effectiveKind: DependencyKind = previous?.kind === 'hard' ? 'hard' : kind
-    const effectiveRange =
-      previous?.kind === 'hard' && kind === 'soft' ? previous.range : (range ?? previous?.range)
-    slot.consumers.set(consumer, { kind: effectiveKind, range: effectiveRange })
+    const hardCount = (previous?.hardCount ?? 0) + (kind === 'hard' ? 1 : 0)
+    const softCount = (previous?.softCount ?? 0) + (kind === 'soft' ? 1 : 0)
+    const hardRange = kind === 'hard' ? (range ?? previous?.hardRange) : previous?.hardRange
+    const softRange = kind === 'soft' ? (range ?? previous?.softRange) : previous?.softRange
+    slot.consumers.set(consumer, { hardCount, softCount, hardRange, softRange })
 
     let detached = false
     return {
@@ -278,7 +281,20 @@ export class ServiceRegistry {
         detached = true
         const target = this.#slots.get(name)
         if (target === undefined) return
-        target.consumers.delete(consumer)
+        const current = target.consumers.get(consumer)
+        if (current === undefined) return
+
+        const nextHard = Math.max(0, current.hardCount - (kind === 'hard' ? 1 : 0))
+        const nextSoft = Math.max(0, current.softCount - (kind === 'soft' ? 1 : 0))
+        if (nextHard === 0 && nextSoft === 0) {
+          target.consumers.delete(consumer)
+        } else {
+          target.consumers.set(consumer, {
+            ...current,
+            hardCount: nextHard,
+            softCount: nextSoft,
+          })
+        }
         this.#prune(name)
       },
     }
@@ -304,7 +320,7 @@ export class ServiceRegistry {
       const slot = this.#slots.get(name)
       if (slot === undefined) continue
       for (const [consumer, record] of slot.consumers) {
-        if (record.kind === 'soft') continue
+        if (record.hardCount === 0) continue
         if (consumer === owner) continue
         if (affected.has(consumer)) continue
         affected.add(consumer)
@@ -330,8 +346,10 @@ export class ServiceRegistry {
     for (const [name, slot] of this.#slots) {
       const consumers: { owner: PluginId; kind: DependencyKind }[] = []
       for (const [consumer, record] of slot.consumers) {
-        edges.push({ consumer, service: name, kind: record.kind, range: record.range })
-        consumers.push({ owner: consumer, kind: record.kind })
+        const kind: DependencyKind = record.hardCount > 0 ? 'hard' : 'soft'
+        const range = kind === 'hard' ? record.hardRange : record.softRange
+        edges.push({ consumer, service: name, kind, range })
+        consumers.push({ owner: consumer, kind })
       }
       services.push({
         name,

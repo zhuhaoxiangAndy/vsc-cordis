@@ -76,6 +76,8 @@
   只删除仍属于本次 `provide` 的条目；新增真实 IPC 回归。
 - **ServiceRegistry 旧 handle 撤销新提供者、hard 依赖边被 soft 覆盖、last-wins 后旧 owner
   `provides` 残留**：handle 绑定 generation、hard 不降级、换人时清理旧 owner 集合。
+  `depend` 进一步改为**按 kind 引用计数**：提前 dispose 一个 edge 不再误删另一条
+  （soft 撤销后 hard 仍在；hard 撤销后 soft 仍在，只是不再参与级联）。
 - **`settle()` 不是队列屏障**：单次 no-op 会排在二级级联之前，返回时仍可能 `queueDepth > 0`。
   现在等待队列尾部，出现新任务就继续等，直到真正排空。
 - **`EffectStack` 并发 `dispose()` / draining 期间 `add()` 破坏严格串行 LIFO**：

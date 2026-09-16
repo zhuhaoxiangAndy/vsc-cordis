@@ -86,6 +86,40 @@ test('hard 依赖边不会被后来的 soft 边覆盖（range 也不被 soft 改
   assert.deepEqual(registry.affectedBy('prov'), ['cons'], 'hard 边必须保留并继续参与级联')
 })
 
+test('depend 引用计数：提前 dispose 一个 edge 不能误删另一条', () => {
+  const registry = new ServiceRegistry()
+  registry.provide('prov', 'clock', 1, { version: '1.0.0' })
+  const hard = registry.depend('cons', 'clock', 'hard', '^1.0.0')
+  const soft = registry.depend('cons', 'clock', 'soft', '>=1.0.0')
+
+  soft.dispose()
+  assert.deepEqual(registry.affectedBy('prov'), ['cons'], 'soft edge 撤销后 hard edge 必须仍在')
+  assert.deepEqual(registry.snapshot().edges, [
+    { consumer: 'cons', service: 'clock', kind: 'hard', range: '^1.0.0' },
+  ])
+
+  hard.dispose()
+  assert.deepEqual(registry.affectedBy('prov'), [], '两条 edge 都撤销后才不再级联')
+  assert.deepEqual(registry.snapshot().edges, [])
+  assert.deepEqual(registry.dependenciesOf('cons'), [])
+})
+
+test('depend 引用计数：hard 撤销后仍保留 soft 边，只是不再级联', () => {
+  const registry = new ServiceRegistry()
+  registry.provide('prov', 'clock', 1, { version: '1.0.0' })
+  const hard = registry.depend('cons', 'clock', 'hard', '^1.0.0')
+  const soft = registry.depend('cons', 'clock', 'soft', '>=1.0.0')
+
+  hard.dispose()
+  assert.deepEqual(registry.affectedBy('prov'), [], '只剩 soft 时不参与硬依赖级联')
+  assert.deepEqual(registry.snapshot().edges, [
+    { consumer: 'cons', service: 'clock', kind: 'soft', range: '>=1.0.0' },
+  ])
+
+  soft.dispose()
+  assert.deepEqual(registry.snapshot().edges, [])
+})
+
 test('revoke 事件携带受影响的硬依赖消费者', () => {
   const registry = new ServiceRegistry()
   const events: ServiceChangeEvent[] = []
