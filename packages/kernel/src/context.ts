@@ -1,5 +1,6 @@
 import type {
   AsyncService,
+  AsyncTextDocument,
   DependencyGraphSnapshot,
   DependencyKind,
   Disposable,
@@ -50,6 +51,37 @@ export function wrapAsyncService<T>(instance: unknown): AsyncService<T> {
   }) as AsyncService<T>
 }
 
+/**
+ * 内核侧对 `TextDocument` 的**结构**要求。
+ *
+ * 刻意不 import `vscode`（kernel 的硬约束，ADR-0009）：这里只声明 `ctx.async` 适配真正
+ * 用到的成员，真实 `TextDocument` 结构上满足它。
+ */
+interface TextDocumentLike {
+  readonly uri: { toString(): string; readonly fsPath: string }
+  readonly languageId: string
+  readonly lineCount: number
+  readonly version: number
+  getText(): string
+}
+
+/**
+ * 把真实 `TextDocument` 适配成 `AsyncTextDocument`（ADR-0018 决策 1）。
+ *
+ * `getText()` 在同进程模式下也返回 Promise —— 两种模式**签名一致**，
+ * 插件代码才能不写 `if (隔离) ... else ...`。
+ */
+function adaptTextDocument(document: TextDocumentLike): AsyncTextDocument {
+  return {
+    uri: document.uri.toString(),
+    fsPath: document.uri.fsPath,
+    languageId: document.languageId,
+    lineCount: document.lineCount,
+    version: document.version,
+    getText: async () => document.getText(),
+  }
+}
+
 export interface PluginContextDeps {
   readonly id: PluginId
   readonly manifest: NormalizedManifest
@@ -93,17 +125,18 @@ export function createPluginContext(deps: PluginContextDeps): PluginContext {
     async: {
       onDidSaveTextDocument: async (listener) => {
         const disposable = vscode.workspace.onDidSaveTextDocument((document) => {
-          listener({
-            uri: document.uri.toString(),
-            fsPath: document.uri.fsPath,
-            languageId: document.languageId,
-            lineCount: document.lineCount,
-            version: document.version,
-            getText: async () => document.getText(),
-          })
+          listener(adaptTextDocument(document))
         })
         // 走 EffectStack：插件即使忘了 dispose，卸载时也会被回收。
         effects.add(() => disposable.dispose(), 'async:onDidSaveTextDocument')
+        return disposable
+      },
+      onDidChangeActiveTextEditor: async (listener) => {
+        const disposable = vscode.window.onDidChangeActiveTextEditor((editor) => {
+          // 没有活动编辑器时原样回调 undefined —— 与隔离模式**同一语义**（ADR-0018 扩展）。
+          listener(editor === undefined ? undefined : adaptTextDocument(editor.document))
+        })
+        effects.add(() => disposable.dispose(), 'async:onDidChangeActiveTextEditor')
         return disposable
       },
       useService: async <T,>(name: ServiceName): Promise<AsyncService<T>> => {

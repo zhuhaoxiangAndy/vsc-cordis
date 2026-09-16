@@ -185,16 +185,18 @@ class FakeHostApi implements IsolatedHostApi {
 
   readonly saveSubscriptions = { active: 0, disposed: 0 }
   readonly #saveForwarders = new Set<(payload: SerializedSaveEvent) => void>()
+  readonly activeEditorSubscriptions = { active: 0, disposed: 0 }
+  readonly #activeEditorForwarders = new Set<(payload: SerializedSaveEvent | undefined) => void>()
   readonly documents = new Map<number, string>()
   #nextDocumentHandle = 1
 
-  /** 测试用：模拟一次"文档已保存"。 */
-  emitSave(options: { uri?: string; text?: string } = {}): number {
+  /** 两种文档事件的载荷同形，这里共用构造，避免它们漂移。 */
+  #makePayload(options: { uri?: string; text?: string }): SerializedSaveEvent {
     const handle = this.#nextDocumentHandle++
     const text = options.text ?? 'saved content'
     const uri = options.uri ?? 'file:///fake/doc.ts'
     this.documents.set(handle, text)
-    const payload: SerializedSaveEvent = {
+    return {
       uri,
       // 与真实 Uri 一致：fsPath 由 uri 推导，而不是各写各的（否则测试会拿到自相矛盾的数据）
       fsPath: uri.replace(/^file:\/\//, ''),
@@ -203,8 +205,19 @@ class FakeHostApi implements IsolatedHostApi {
       version: 7,
       documentHandle: handle,
     }
+  }
+
+  /** 测试用：模拟一次"文档已保存"。 */
+  emitSave(options: { uri?: string; text?: string } = {}): number {
+    const payload = this.#makePayload(options)
     for (const forward of [...this.#saveForwarders]) forward(payload)
-    return handle
+    return payload.documentHandle
+  }
+
+  /** 测试用：模拟一次"活动编辑器变化"；`null` 表示当前没有活动编辑器。 */
+  emitActiveEditorChange(options: { uri?: string; text?: string } | null = {}): void {
+    const payload = options === null ? undefined : this.#makePayload(options)
+    for (const forward of [...this.#activeEditorForwarders]) forward(payload)
   }
 
   subscribeSaveEvents(_pluginId: string, forward: (payload: SerializedSaveEvent) => void): { dispose(): void } {
@@ -215,6 +228,21 @@ class FakeHostApi implements IsolatedHostApi {
         this.saveSubscriptions.active -= 1
         this.saveSubscriptions.disposed += 1
         this.#saveForwarders.delete(forward)
+      },
+    }
+  }
+
+  subscribeActiveEditorChanges(
+    _pluginId: string,
+    forward: (payload: SerializedSaveEvent | undefined) => void,
+  ): { dispose(): void } {
+    this.activeEditorSubscriptions.active += 1
+    this.#activeEditorForwarders.add(forward)
+    return {
+      dispose: () => {
+        this.activeEditorSubscriptions.active -= 1
+        this.activeEditorSubscriptions.disposed += 1
+        this.#activeEditorForwarders.delete(forward)
       },
     }
   }
@@ -1307,6 +1335,124 @@ test('ADR-0015：隔离插件的回收预算随 activate 下发给子进程（�
     const logs = hostApi.logs.map((entry) => entry.message).join('\n')
     assert.match(logs, /预算耗尽/)
     assert.match(logs, /fast/, '被跳过的项必须留下可检索的记录（不能静默 break）')
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+// ————————————————————————————————— ADR-0018 扩展：活动编辑器事件
+
+test('ADR-0018：隔离插件订阅活动编辑器变化（含"没有活动编辑器"），且与保存事件互不污染', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'editor-plugin',
+    `module.exports = {
+       activate: async (ctx) => {
+         let lastSave = 'none'
+         let lastEditor = 'none'
+         const save = await ctx.async.onDidSaveTextDocument(async (d) => {
+           lastSave = await d.getText()
+         })
+         const editor = await ctx.async.onDidChangeActiveTextEditor(async (d) => {
+           // undefined 是"没有活动编辑器"这个事实本身，必须原样传到这里
+           lastEditor = d === undefined ? '<none>' : [d.fsPath, d.languageId, await d.getText()].join('|')
+         })
+         ctx.effect(() => save, (d) => d.dispose(), 'async:save')
+         ctx.effect(() => editor, (d) => d.dispose(), 'async:editor')
+         ctx.effect(() => ctx.vscode.commands.registerCommand('ev.save', () => lastSave), (d) => d.dispose(), 'cmd:save')
+         ctx.effect(() => ctx.vscode.commands.registerCommand('ev.editor', () => lastEditor), (d) => d.dispose(), 'cmd:editor')
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register', 'vscode:workspace.read'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(hostApi.saveSubscriptions.active, 1)
+    assert.equal(hostApi.activeEditorSubscriptions.active, 1)
+
+    // 保存事件只喂给保存监听器
+    hostApi.emitSave({ uri: 'file:///w/saved.ts', text: 'saved text' })
+    await sleep(250)
+    assert.equal(await hostApi.executeCommand('editor-plugin', 'ev.save', []), 'saved text')
+    assert.equal(await hostApi.executeCommand('editor-plugin', 'ev.editor', []), 'none', '保存事件不该污染活动编辑器监听器')
+
+    // 活动编辑器事件只喂给编辑器监听器
+    hostApi.emitActiveEditorChange({ uri: 'file:///w/current.ts', text: 'current text' })
+    await sleep(250)
+    assert.equal(await hostApi.executeCommand('editor-plugin', 'ev.editor', []), '/w/current.ts|typescript|current text')
+    assert.equal(await hostApi.executeCommand('editor-plugin', 'ev.save', []), 'saved text', '活动编辑器事件不该污染保存监听器')
+
+    // 没有活动编辑器：回调收到 undefined，而不是"事件没发生"
+    hostApi.emitActiveEditorChange(null)
+    await sleep(250)
+    assert.equal(await hostApi.executeCommand('editor-plugin', 'ev.editor', []), '<none>')
+  } finally {
+    await host.unload('editor-plugin')
+    await host.settle()
+  }
+
+  assert.equal(hostApi.saveSubscriptions.active, 0, '卸载后不得残留保存事件订阅')
+  assert.equal(hostApi.activeEditorSubscriptions.active, 0, '卸载后不得残留活动编辑器订阅')
+  assert.equal(hostApi.saveSubscriptions.disposed, 1)
+  assert.equal(hostApi.activeEditorSubscriptions.disposed, 1)
+})
+
+test('ADR-0018：隔离插件订阅活动编辑器变化需要 vscode:workspace.read 权限', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'editor-no-perm',
+    `module.exports = {
+       activate: async (ctx) => {
+         await ctx.async.onDidChangeActiveTextEditor(() => undefined)
+       },
+     }\n`,
+    { permissions: [] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  await assert.rejects(host.load(entry), (error: unknown) => {
+    assert.match(String(error), /未获得权限 "vscode:workspace\.read"/)
+    return true
+  })
+  assert.equal(hostApi.activeEditorSubscriptions.active, 0, '被拒绝的订阅不该在宿主侧留下监听器')
+})
+
+test('ADR-0018：活动编辑器的同步入口在隔离模式下抛错并指向 ctx.async 替代路径', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'editor-sync-entry',
+    `module.exports = {
+       activate(ctx) {
+         let message = 'none'
+         try {
+           ctx.vscode.window.onDidChangeActiveTextEditor(() => undefined)
+         } catch (error) {
+           message = String(error && error.message ? error.message : error)
+         }
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('editor.syncError', () => message),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    const message = String(await hostApi.executeCommand('editor-sync-entry', 'editor.syncError', []))
+    assert.match(message, /`ctx\.vscode\.window\.onDidChangeActiveTextEditor` 在隔离模式下不可用/)
+    // 只告诉用户"不行"而不告诉"那该怎么办"是半个答案
+    assert.match(message, /ctx\.async\.onDidChangeActiveTextEditor/)
+    assert.match(message, /undefined/)
+    assert.match(message, /ADR-0018/)
   } finally {
     await host.unloadAll().catch(() => undefined)
     await host.settle()

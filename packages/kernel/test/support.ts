@@ -30,6 +30,8 @@ export class FakeHostPort implements HostPort {
   readonly apiCalls: string[] = []
   /** 已注册的"文档保存"监听器（用于测试 ctx.async 的同进程实现）。 */
   readonly saveListeners = new Set<(document: unknown) => void>()
+  /** 已注册的"活动编辑器变化"监听器；事件参数可以是 undefined（没有活动编辑器）。 */
+  readonly activeEditorListeners = new Set<(editor: unknown) => void>()
   readonly factories = new Map<PluginId, () => CordisPlugin>()
   /** 让测试可以模拟"模块加载失败"或"activate 卡住"。 */
   loadDelayMs = 0
@@ -99,6 +101,15 @@ export class FakeHostPort implements HostPort {
         showErrorMessage: async () => undefined,
         createStatusBarItem: () => ({ dispose(): void {} }),
         createOutputChannel: () => ({ appendLine(): void {}, dispose(): void {} }),
+        onDidChangeActiveTextEditor: (listener: (editor: never) => unknown) => {
+          const registered = listener as (editor: unknown) => void
+          port.activeEditorListeners.add(registered)
+          return {
+            dispose: (): void => {
+              port.activeEditorListeners.delete(registered)
+            },
+          }
+        },
       },
       workspace: {
         workspaceFolders: undefined,
@@ -121,17 +132,33 @@ export class FakeHostPort implements HostPort {
     return api as unknown as PluginVscodeApi
   }
 
-  /** 测试用：模拟一次文档保存，构造一个"形似 TextDocument"的对象（只有 ctx.async 会用到的那几个成员）。 */
-  emitSave(options: { uri?: string; languageId?: string; lineCount?: number; version?: number; text?: string } = {}): void {
+  /** 测试用：构造一个"形似 TextDocument"的对象（只有 ctx.async 会用到的那几个成员）。 */
+  #makeDocument(
+    options: { uri?: string; languageId?: string; lineCount?: number; version?: number; text?: string },
+  ): unknown {
     const uriString = options.uri ?? 'file:///fake/doc.ts'
-    const document = {
+    return {
       uri: { toString: () => uriString, fsPath: uriString.replace('file://', '') },
       languageId: options.languageId ?? 'plaintext',
       lineCount: options.lineCount ?? 1,
       version: options.version ?? 1,
       getText: () => options.text ?? '',
     }
+  }
+
+  /** 测试用：模拟一次文档保存。 */
+  emitSave(options: { uri?: string; languageId?: string; lineCount?: number; version?: number; text?: string } = {}): void {
+    const document = this.#makeDocument(options)
     for (const listener of [...this.saveListeners]) listener(document)
+  }
+
+  /** 测试用：模拟一次活动编辑器变化；`null` 表示当前没有活动编辑器。 */
+  emitActiveEditor(
+    options: { uri?: string; languageId?: string; lineCount?: number; version?: number; text?: string } | null = {},
+  ): void {
+    // 真实 API 的事件参数是 `TextEditor | undefined`，这里给出同形状的 { document } / undefined
+    const editor = options === null ? undefined : { document: this.#makeDocument(options) }
+    for (const listener of [...this.activeEditorListeners]) listener(editor)
   }
 
   log(level: LogLevel, message: string, meta?: Readonly<Record<string, unknown>>): void {

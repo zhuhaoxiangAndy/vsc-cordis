@@ -10,8 +10,8 @@ import type { CordisPlugin } from '@vscordis/sdk'
  * - **状态栏项**：`item.text = ...` 之后立刻读回就是新值（本地镜像），
  *   而变更通过一条串行 RPC 队列同步到宿主 —— 顺序有保证，不会出现"显示了但文字还是旧的"。
  *
- * 它**不能**用 `ctx.use` / `ctx.provide`（服务是进程内对象），也**不能**订阅文档事件 ——
- * 理由在 ADR-0016 里，是设计边界而不是待办。
+ * 它**不能**用 `ctx.use` / `ctx.provide`（服务是进程内对象）；
+ * 文档事件（保存 / 活动编辑器变化）走 **`ctx.async`**（ADR-0018），两种模式签名一致。
  */
 export default {
   name: 'isolated-hello',
@@ -37,6 +37,18 @@ export default {
       channel.appendLine(`保存：${document.fsPath}（${document.lineCount} 行，${text.length} 字符）`)
     })
     ctx.effect(() => subscription, (disposable) => disposable.dispose(), 'async:onDidSaveTextDocument')
+
+    // 活动编辑器变化：没有活动编辑器时回调 undefined（不是"事件没发生"）。
+    const editorSubscription = await ctx.async.onDidChangeActiveTextEditor((document) => {
+      channel.appendLine(
+        document === undefined ? '活动编辑器：<无>' : `当前文件：${document.fsPath}（${document.languageId}）`,
+      )
+    })
+    ctx.effect(
+      () => editorSubscription,
+      (disposable) => disposable.dispose(),
+      'async:onDidChangeActiveTextEditor',
+    )
 
     ctx.effect(
       () => api.commands.registerCommand('isolated-hello.greet', (name?: unknown) => {

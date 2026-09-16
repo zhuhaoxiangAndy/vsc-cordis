@@ -11,6 +11,7 @@ import {
   type HostMethod,
   type HostToChild,
   type IsolatedPermissions,
+  type SerializedSaveEvent,
   type SerializedWorkspaceFolder,
 } from './protocol.ts'
 
@@ -40,8 +41,13 @@ interface PendingCall {
 
 const pendingCalls = new Map<number, PendingCall>()
 const commandHandlers = new Map<string, (...args: unknown[]) => unknown>()
-/** 订阅句柄 → 监听器。宿主转发事件时按句柄派发。 */
-const eventListeners = new Map<number, (document: AsyncTextDocument) => void>()
+/**
+ * 订阅句柄 → 监听器。
+ *
+ * 参数是**事件载荷**（可为 undefined：活动编辑器事件在"没有活动编辑器"时会原样收到 undefined）。
+ * 每个 `ctx.async.*` 入口在登记时把载荷适配成对应签名需要的形状。
+ */
+const eventListeners = new Map<number, (payload: SerializedSaveEvent | undefined) => void>()
 /**
  * 本进程**提供**的服务：名称 → 实例。
  *
@@ -519,6 +525,9 @@ function buildVscodeProxy(permissions: IsolatedPermissions): PluginVscodeApi {
         requireLocally(permissions.window.output, 'vscode:window.output')
         return createOutputChannelHandle(name)
       }) as unknown as PluginVscodeApi['window']['createOutputChannel'],
+      // 同步入口继续不支持，但错误信息必须指向 ctx.async 的替代路径（ADR-0018 决策 3）。
+      onDidChangeActiveTextEditor: (() =>
+        unsupported('window.onDidChangeActiveTextEditor')) as unknown as PluginVscodeApi['window']['onDidChangeActiveTextEditor'],
     },
     workspace: {
       get workspaceFolders(): readonly never[] | undefined {
@@ -613,6 +622,22 @@ function permissionList(permissions: IsolatedPermissions): Permission[] {
   return list
 }
 
+/**
+ * 把宿主转发过来的**纯数据载荷**适配成 `AsyncTextDocument`（ADR-0018）。
+ *
+ * 正文不随事件传：`getText()` 按句柄跨进程取，句柄有生命周期（过期会得到明确错误）。
+ */
+function adaptAsyncDocument(payload: SerializedSaveEvent): AsyncTextDocument {
+  return {
+    uri: payload.uri,
+    fsPath: payload.fsPath,
+    languageId: payload.languageId,
+    lineCount: payload.lineCount,
+    version: payload.version,
+    getText: () => callHost('document.getText', [payload.documentHandle]) as Promise<string>,
+  }
+}
+
 function buildContext(activation: ActivationState, stack: EffectStack): PluginContext {
   const { pluginId } = activation
 
@@ -642,7 +667,21 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
     async: {
       onDidSaveTextDocument: async (listener) => {
         const opened = (await callHost('events.onDidSaveTextDocument', [])) as { subscription: number }
-        eventListeners.set(opened.subscription, listener)
+        // 保存事件一定带文档；这里显式挡掉 undefined，让类型契约不因"事件种类共用载荷"而变松。
+        eventListeners.set(opened.subscription, (payload) => {
+          if (payload !== undefined) listener(adaptAsyncDocument(payload))
+        })
+        return new LocalDisposable(() => {
+          eventListeners.delete(opened.subscription)
+          void callHost('events.unsubscribe', [opened.subscription]).catch(() => undefined)
+        })
+      },
+      onDidChangeActiveTextEditor: async (listener) => {
+        const opened = (await callHost('events.onDidChangeActiveTextEditor', [])) as { subscription: number }
+        // undefined 要**原样**传下去：那是"现在没有活动编辑器"，不是"事件丢了"。
+        eventListeners.set(opened.subscription, (payload) => {
+          listener(payload === undefined ? undefined : adaptAsyncDocument(payload))
+        })
         return new LocalDisposable(() => {
           eventListeners.delete(opened.subscription)
           void callHost('events.unsubscribe', [opened.subscription]).catch(() => undefined)
@@ -862,16 +901,9 @@ process.on('message', (raw: unknown) => {
     case 'event': {
       const listener = eventListeners.get(message.subscription)
       if (listener === undefined) break
-      const payload = message.payload
-      // 正文**按需**取：句柄有生命周期，过期后会得到一条明确的错误（而不是空串）。
-      listener({
-        uri: payload.uri,
-        fsPath: payload.fsPath,
-        languageId: payload.languageId,
-        lineCount: payload.lineCount,
-        version: payload.version,
-        getText: () => callHost('document.getText', [payload.documentHandle]) as Promise<string>,
-      })
+      // 载荷适配在各自的监听器闭包里：保存事件必然非空、活动编辑器事件可以为空。
+      // 这里只负责按句柄派发，不解释事件语义。
+      listener(message.payload)
       break
     }
     case 'invokeService':

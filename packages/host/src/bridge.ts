@@ -200,6 +200,12 @@ export class VscodeBridge implements HostPort {
           track<vscode.Disposable>('vscode:workspace.read', 'onDidSaveTextDocument', () =>
             vscode.workspace.onDidSaveTextDocument(listener),
           )) as unknown as typeof vscode.workspace.onDidSaveTextDocument,
+        // 活动编辑器事件挂在 window 上，但**读的是工作区内容**，所以权限归 workspace.read
+        // （与保存事件一致）。事件回调参数里有 TextDocument，隔离模式无法诚实履行 → 用 ctx.async。
+        onDidChangeActiveTextEditor: ((listener: (editor: vscode.TextEditor | undefined) => unknown) =>
+          track<vscode.Disposable>('vscode:workspace.read', 'onDidChangeActiveTextEditor', () =>
+            vscode.window.onDidChangeActiveTextEditor(listener),
+          )) as unknown as typeof vscode.window.onDidChangeActiveTextEditor,
       },
 
       // 构造函数类成员是无副作用的工具，直接放行（插件需要它们来构造 Uri / 事件 / 清理器）。

@@ -83,6 +83,14 @@ export interface IsolatedHostApi {
    * （大文件每次保存都整篇走 IPC 不可接受），而是等子进程按需用句柄来取。
    */
   subscribeSaveEvents(pluginId: string, forward: (payload: SerializedSaveEvent) => void): Disposable
+  /**
+   * 订阅活动编辑器变化（ADR-0018 扩展）。
+   * `forward(undefined)` 表示"事件发生了，但当前没有活动编辑器"——必须原样转发。
+   */
+  subscribeActiveEditorChanges(
+    pluginId: string,
+    forward: (payload: SerializedSaveEvent | undefined) => void,
+  ): Disposable
   /** 按句柄读正文。句柄**有生命周期**且**按插件归属校验**；过期或越权都会给出明确错误。 */
   readDocumentText(pluginId: string, handle: number): Promise<string>
   workspaceFolders(): readonly SerializedWorkspaceFolder[]
@@ -802,7 +810,18 @@ class IsolatedSession {
           require('vscode:workspace.read')
           const subscriptionId = ++this.#eventSeq
           const disposable = this.#options.hostApi.subscribeSaveEvents(pluginId, (payload) => {
-            this.#send({ kind: 'event', subscription: subscriptionId, payload })
+            this.#send({ kind: 'event', subscription: subscriptionId, event: 'save', payload })
+          })
+          this.#eventSubscriptions.set(subscriptionId, disposable)
+          this.#reply(call.id, { subscription: subscriptionId })
+          break
+        }
+        case 'events.onDidChangeActiveTextEditor': {
+          // 与保存事件同一套句柄/权限/清理机制（ADR-0018）：差别只在事件种类与"可以为空"。
+          require('vscode:workspace.read')
+          const subscriptionId = ++this.#eventSeq
+          const disposable = this.#options.hostApi.subscribeActiveEditorChanges(pluginId, (payload) => {
+            this.#send({ kind: 'event', subscription: subscriptionId, event: 'activeEditor', payload })
           })
           this.#eventSubscriptions.set(subscriptionId, disposable)
           this.#reply(call.id, { subscription: subscriptionId })

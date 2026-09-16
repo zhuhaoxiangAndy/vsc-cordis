@@ -90,6 +90,10 @@ class SilentHostApi implements IsolatedHostApi {
     return { dispose: () => undefined }
   }
 
+  subscribeActiveEditorChanges(): { dispose(): void } {
+    return { dispose: () => undefined }
+  }
+
   async readDocumentText(): Promise<string> {
     return ''
   }

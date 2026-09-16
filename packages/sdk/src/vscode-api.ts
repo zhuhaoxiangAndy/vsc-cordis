@@ -20,6 +20,7 @@ export type PluginVscodeApi = {
     | 'showErrorMessage'
     | 'createStatusBarItem'
     | 'createOutputChannel'
+    | 'onDidChangeActiveTextEditor'
   >
   readonly workspace: Pick<
     typeof vscode.workspace,

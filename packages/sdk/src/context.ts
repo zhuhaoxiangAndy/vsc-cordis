@@ -124,6 +124,16 @@ export interface AsyncApi {
    */
   onDidSaveTextDocument(listener: (document: AsyncTextDocument) => void): Promise<Disposable>
   /**
+   * 订阅**活动编辑器变化**（ADR-0018 的第二个事件）。
+   *
+   * - 没有活动编辑器时（例如最后一个编辑器被关闭）监听器收到 `undefined`；
+   * - 载荷与保存事件**同一形状**：纯数据 + 显式异步的 `getText()`；
+   * - 需要 `vscode:workspace.read` 权限；
+   * - 选它而不是"配置变化"的理由：它复用已有的**文档句柄**设计，
+   *   而配置变化在隔离模式下已由宿主主动推送值（M4c），不急着再铺一个事件面。
+   */
+  onDidChangeActiveTextEditor(listener: (document: AsyncTextDocument | undefined) => void): Promise<Disposable>
+  /**
    * 取用一个服务，返回**方法全异步**的代理（ADR-0019）。
    *
    * 两种模式都能用，且签名一致 —— 服务在本进程时，代理只是把返回值包一层 Promise。

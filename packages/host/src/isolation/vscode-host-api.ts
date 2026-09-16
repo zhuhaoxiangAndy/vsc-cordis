@@ -220,15 +220,30 @@ export class VscodeHostApi implements IsolatedHostApi {
 
   subscribeSaveEvents(pluginId: string, forward: (payload: SerializedSaveEvent) => void): Disposable {
     return vscode.workspace.onDidSaveTextDocument((document) => {
-      forward({
-        uri: document.uri.toString(),
-        fsPath: document.uri.fsPath,
-        languageId: document.languageId,
-        lineCount: document.lineCount,
-        version: document.version,
-        documentHandle: this.#rememberDocument(pluginId, document),
-      })
+      forward(this.#snapshot(pluginId, document))
     })
+  }
+
+  subscribeActiveEditorChanges(
+    pluginId: string,
+    forward: (payload: SerializedSaveEvent | undefined) => void,
+  ): Disposable {
+    return vscode.window.onDidChangeActiveTextEditor((editor) => {
+      // 没有活动编辑器也要**转发**：那是事件本身的信息，跳过会让插件保留过期的"当前文件"。
+      forward(editor === undefined ? undefined : this.#snapshot(pluginId, editor.document))
+    })
+  }
+
+  /** 把真实 `TextDocument` 降级成纯数据 + 宿主侧句柄（两种文档事件共用）。 */
+  #snapshot(pluginId: string, document: vscode.TextDocument): SerializedSaveEvent {
+    return {
+      uri: document.uri.toString(),
+      fsPath: document.uri.fsPath,
+      languageId: document.languageId,
+      lineCount: document.lineCount,
+      version: document.version,
+      documentHandle: this.#rememberDocument(pluginId, document),
+    }
   }
 
   async readDocumentText(pluginId: string, handle: number): Promise<string> {

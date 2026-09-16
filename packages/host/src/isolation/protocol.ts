@@ -35,6 +35,7 @@ export type HostMethod =
   | 'statusBar.dispose'
   | 'log'
   | 'events.onDidSaveTextDocument'
+  | 'events.onDidChangeActiveTextEditor'
   | 'events.unsubscribe'
   | 'document.getText'
   | 'services.provide'
@@ -116,8 +117,18 @@ export type HostToChild =
    * 所以宿主在配置变化时主动把新值推过来，子进程侧始终读本地缓存（ADR-0016）。
    */
   | { readonly kind: 'configChanged'; readonly values: Readonly<Record<string, unknown>> }
-  /** 宿主 → 子进程的事件转发。`subscription` 是宿主分配的句柄，子进程按它派发给对应监听器。 */
-  | { readonly kind: 'event'; readonly subscription: number; readonly payload: SerializedSaveEvent }
+  /**
+   * 宿主 → 子进程的事件转发。`subscription` 是宿主分配的句柄，子进程按它派发给对应监听器。
+   *
+   * `event` 区分事件种类：两种载荷**形状相同**（纯数据 + 文档句柄），但监听器签名不同 ——
+   * `save` 一定带文档，`activeEditor` 可以是 `undefined`（当前没有活动编辑器）。
+   */
+  | {
+      readonly kind: 'event'
+      readonly subscription: number
+      readonly event: 'save' | 'activeEditor'
+      readonly payload: SerializedSaveEvent | undefined
+    }
   /**
    * 宿主 → 子进程的**服务方法调用**（ADR-0019）。
    *
@@ -192,6 +203,11 @@ export const ISOLATION_UNSUPPORTED: Readonly<Record<string, string>> = {
     '带 `getText()` / `positionAt()` 这类**同步方法**，跨进程没法诚实履行。\n' +
     '请改用 **`ctx.async.onDidSaveTextDocument`** —— 那份 API 在两种模式下签名一致，' +
     '回调收到的是纯数据快照 + 显式异步的 `getText()`。详见 ADR-0018。',
+  'window.onDidChangeActiveTextEditor':
+    '`ctx.vscode.window.onDidChangeActiveTextEditor` 在隔离模式下不可用：它的回调参数是 `TextEditor` / `TextDocument`，' +
+    '带 `getText()` 这类**同步方法**，跨进程没法诚实履行。\n' +
+    '请改用 **`ctx.async.onDidChangeActiveTextEditor`** —— 两种模式下签名一致，' +
+    '回调收到的是纯数据 + 显式异步的 `getText()`（没有活动编辑器时收到 `undefined`）。详见 ADR-0018。',
   'services.syncConsumer':
     '隔离模式下不能用 `ctx.use` / `ctx.tryUse`：它们的类型是**同步**的（`clock.now()` 返回 `Date`），\n' +
     '而跨进程的服务调用只能是异步的。\n' +

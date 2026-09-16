@@ -78,6 +78,34 @@ export interface AsyncApi {
 少了任何一边都会留下"事件发进黑洞"或"宿主白跑监听"的残留。测试同时断言
 `saveSubscriptions.active === 0` 与 `disposed === 1`。
 
+## 后续轮次补齐：第二个事件 —— 活动编辑器变化
+
+「未覆盖 2」写的是"只覆盖 `onDidSaveTextDocument` 一种事件；纳入哪一个由真实需求驱动"。
+本轮纳入 **`onDidChangeActiveTextEditor`**，理由不是"顺手多做一个"，而是它**复用已有的文档句柄设计**：
+
+- 载荷与保存事件**同形**（纯数据 + 文档句柄），`getText()` 仍按句柄跨进程取；
+- 协议只多一个 `HostMethod` 与一个事件判别字段（`event: 'save' | 'activeEditor'`），
+  **不需要第二套句柄机制**；
+- 它与保存事件共用同一张 `eventListeners` 表与 `events.unsubscribe`，
+  决策 5 的"双向清理"路径原样复用（宿主侧 `#cleanupHostSide` 兜底也不变）。
+
+三条语义决定：
+
+1. **没有活动编辑器时回调 `undefined`，并且必须原样转发**（不是静默跳过）——
+   "当前没有活动编辑器"是事件的信息本身；跳过会让插件保留一个过期的"当前文件"。
+2. **权限归 `vscode:workspace.read`**：事件读的是工作区内容（与保存事件一致）。
+   同步入口 `ctx.vscode.window.onDidChangeActiveTextEditor` 在隔离模式下抛错，
+   错误信息指向 `ctx.async.onDidChangeActiveTextEditor`（决策 3 的"半个答案"规则同样适用），
+   两条路径都有测试断言替代路径存在。注意：这个成员是**为了 `ctx.async` 才加进受控 API 的**，
+   它本身不是给插件同步用的。
+3. **两种模式同一签名**（决策 1）：kernel 侧把真实 `TextEditor` 适配成 `AsyncTextDocument`，
+   `undefined` 语义一致；测试还断言保存与活动编辑器两个订阅**互不污染**（协议判别字段的意义）。
+
+**为什么不是"配置变化"**：隔离模式下配置值已经由宿主在变化时**推送**给子进程（M4c，见 ADR-0016），
+插件侧读值始终同步且不陈旧；"再补一个配置变化事件"的边际价值低，而它需要一套**新的事件句柄**
+（`affectsConfiguration(section)` 必须跨进程查询，无法复用文档句柄）。
+留给真实需求驱动，不先铺开。
+
 ## 未覆盖
 
 1. **跨进程服务仍然没有对等物**（`ctx.async` 里没有 `useService`）。
@@ -85,8 +113,9 @@ export interface AsyncApi {
    方法发现、参数与返回值的序列化契约、方法调用失败的错误传播、以及"提供者退出时
    消费者的在途调用怎么办"。这不是一个量级的工作，且没有它并不影响隔离方案成立 ——
    需要服务协作的插件用 `trust: trusted`（ADR-0003 已说明它只防误用）。
-2. **只覆盖 `onDidSaveTextDocument` 一种事件**。配置变化、活动编辑器变化等尚未纳入 `ctx.async`；
-   纳入哪一个由真实需求驱动，而不是先把面铺开。
+2. ~~只覆盖 `onDidSaveTextDocument` 一种事件~~ → 已补 `onDidChangeActiveTextEditor`
+   （见"后续轮次补齐"）。**配置变化事件仍不做**：隔离模式下配置值已由宿主推送（M4c），
+   且它需要一套新的事件句柄（`affectsConfiguration` 必须跨进程查询，复用不了文档句柄）。
 3. **同进程模式下 `getText()` 的返回值是快照**（调用时刻的正文），
    而隔离模式下是**按句柄取回的当时正文**。两者在"调用后对方又改了文档"这一瞬间可能有差异，
    实战中无影响（保存事件里读正文），但值得记下来。

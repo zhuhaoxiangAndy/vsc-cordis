@@ -104,3 +104,44 @@ test('ctx.async：订阅建立的失败会让 activate 失败（不吞异常）'
   assert.equal(host.view('denied')?.state, 'failed')
   await host.dispose()
 })
+
+test('ctx.async.onDidChangeActiveTextEditor：适配成纯数据 + 异步 getText，无编辑器时回调 undefined', async () => {
+  const port = new FakeHostPort()
+  const seen: string[] = []
+
+  port.define('editor-watcher', (): CordisPlugin => ({
+    async activate(ctx) {
+      const subscription = await ctx.async.onDidChangeActiveTextEditor(async (document) => {
+        seen.push(
+          document === undefined
+            ? '<none>'
+            : `${document.fsPath}|${document.languageId}|${document.lineCount}|${await document.getText()}`,
+        )
+      })
+      ctx.effect(() => subscription, (disposable) => disposable.dispose(), 'async:activeEditor')
+    },
+  }))
+
+  const host = hostFor(port)
+  await host.load(makeEntry('editor-watcher'))
+  await host.settle()
+
+  // 事件之间留出间隔：监听器是异步的（要 await getText()），同步连发不保证回调顺序，
+  // 而真实事件本来就是先后发生的。
+  port.emitActiveEditor({ uri: 'file:///w/a.ts', languageId: 'typescript', lineCount: 2, text: 'current file' })
+  await sleep(20)
+  // "没有活动编辑器"必须原样回调 undefined，而不是被静默跳过
+  port.emitActiveEditor(null)
+  await sleep(20)
+
+  assert.deepEqual(seen, ['/w/a.ts|typescript|2|current file', '<none>'])
+
+  await host.unload('editor-watcher')
+  await host.settle()
+  assert.equal(port.activeEditorListeners.size, 0, '卸载后不应残留活动编辑器监听器')
+
+  port.emitActiveEditor({ text: 'after unload' })
+  await sleep(20)
+  assert.equal(seen.length, 2, '卸载之后不该再收到事件')
+  await host.dispose()
+})

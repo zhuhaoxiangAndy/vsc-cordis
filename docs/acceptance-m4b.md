@@ -85,8 +85,13 @@ pnpm run verify        # 会构建出 packages/host/dist/isolated-worker.cjs
 | 3 | 在一个大文件里保存 | **通道里只有一条摘要，没有整篇正文** —— 正文是插件按需用句柄取的，不随事件传输 |
 | 4 | 连续保存 70+ 次，然后让插件读第 1 次的正文 | 会得到明确的"**句柄已过期**"错误（宿主只为每个插件保留最近 64 个句柄，避免把文档一直钉在内存里） |
 | 5 | `VSCordis: 卸载插件…` → `isolated-hello`，然后再保存文件 | 输出通道**不再**出现新的保存行 —— 说明宿主侧订阅随卸载被释放了 |
+| 6 | 切换活动编辑器（点另一个文件） | 输出通道出现 `当前文件：<路径>（<语言>）` —— 这是 `ctx.async.onDidChangeActiveTextEditor`（ADR-0018 扩展） |
+| 7 | 关闭所有编辑器 | 输出通道出现 `活动编辑器：<无>` —— "没有活动编辑器"是事件的信息本身，必须原样传达，而不是静默跳过 |
+| 8 | 卸载 `isolated-hello`，再切换编辑器 | 不再出现新的 `当前文件` 行（活动编辑器订阅与保存订阅共用同一套双向清理） |
 
 想确认"同步入口确实不可用"，可以在插件的 `activate` 里加一行
 `ctx.vscode.workspace.onDidSaveTextDocument(() => {})`：插件会进入 `failed`，
 而错误信息会**直接告诉你改用 `ctx.async.onDidSaveTextDocument`**。这是刻意的：
 只告诉用户"不行"而不告诉"那该怎么办"是半个答案。
+活动编辑器的同步入口（`ctx.vscode.window.onDidChangeActiveTextEditor`）同理，
+错误信息会指向 `ctx.async.onDidChangeActiveTextEditor`。

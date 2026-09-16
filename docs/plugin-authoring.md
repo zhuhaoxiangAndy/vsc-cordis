@@ -115,16 +115,26 @@ const subscription = await ctx.async.onDidSaveTextDocument(async (doc) => {
   ctx.log.info(`保存：${doc.fsPath}（${doc.lineCount} 行，${text.length} 字符）`)
 })
 ctx.effect(() => subscription, (d) => d.dispose(), 'async:save')
+
+// 活动编辑器变化：没有活动编辑器时回调 undefined（例如最后一个编辑器被关闭）
+const onEditor = await ctx.async.onDidChangeActiveTextEditor(async (doc) => {
+  if (doc === undefined) return
+  ctx.log.info(`当前文件：${doc.fsPath}`)
+})
+ctx.effect(() => onEditor, (d) => d.dispose(), 'async:editor')
 ```
 
 - **为什么单独一个面**：`ctx.vscode.workspace.onDidSaveTextDocument` 的回调参数是 `TextDocument`，
   带 `getText()` 这类**同步方法**；隔离模式下正文只能跨进程按需取，
   所以那份 API 在隔离模式下**抛错**（错误信息会指向这里）。
+  活动编辑器的同步入口 `ctx.vscode.window.onDidChangeActiveTextEditor` 同理。
 - 这个面在**两种模式下签名一致**，你的插件代码不需要 `if (隔离) ... else ...`。
-- 需要 `vscode:workspace.read` 权限。
+- 需要 `vscode:workspace.read` 权限（两种事件都是读工作区内容）。
 - 正文**按需取**：事件载荷是纯数据 + 句柄，宿主不会把整篇文档塞进 IPC。
   句柄有生命周期（每个插件保留最近 64 个），过期后再 `getText()` 会抛**明确错误**（不是空串）。
   所以请在事件回调里**及时**读正文。
+- 目前 `ctx.async` 支持上面两种事件。**配置变化没有对应事件**：隔离模式下配置值由宿主主动推送，
+  `getConfiguration().get()` 始终同步且不陈旧（见上一节），不需要再订阅。
 
 ### 隔离模式写状态栏项
 ```ts
