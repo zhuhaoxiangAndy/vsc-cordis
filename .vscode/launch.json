@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "运行 vscordis 扩展（M1/M2 手动验收）",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/packages/host"],
+      "outFiles": ["${workspaceFolder}/packages/host/dist/**/*"],
+      "preLaunchTask": "vscordis: build"
+    }
+  ]
+}

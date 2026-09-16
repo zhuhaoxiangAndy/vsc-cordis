@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm run typecheck
+
+      - name: 单元测试（kernel + 加载器）
+        run: pnpm test
+
+      - name: 构建（插件 + Node 宿主 + Web 宿主）
+        run: pnpm run build
+
+      - name: 产物契约冒烟
+        run: pnpm run smoke
+
+      # 说明（用户决策）：不跑 @vscode/test-electron e2e。
+      # 桥接层（bridge.ts）因此只能靠 tsc + 手动验收覆盖，见 docs/acceptance-m1-m2.md。
+      - name: 提示未覆盖范围
+        run: echo "bridge.ts 需要真实 vscode 模块，仅由 tsc 与手动验收覆盖"

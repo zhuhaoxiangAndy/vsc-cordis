@@ -1,0 +1,36 @@
+feat(host): VSCode 宿主扩展、示例插件与桥接层（M1 + M2 达成）
+
+新增
+- packages/host：唯一发布单元。bridge.ts 是 kernel 与真实 vscode 之间**唯一**的接触面：
+  受控 API 子集 + 调用时刻鉴权 + 自动 effect 登记（插件漏写 ctx.effect 也不会泄漏）。
+- packages/host/src/loader-node.ts：in-process 加载器。realpath containment 防 symlink 逃逸；
+  加载前先遗忘上一代缓存（否则热重载拿到旧模块）；卸载时清空插件目录下**整棵** require.cache。
+- packages/host/src/discovery.ts：插件发现。支持 ${workspaceFolder} 变量替换、坏清单隔离、id 去重。
+- packages/host/src/runtime.ts：装配 + 6 个宿主入口命令。其中「vscordis: 运行插件命令…」
+  是 ADR-0002 要求的动态命令代理 —— 因为运行时注册的命令从不进入命令面板。
+- packages/host/src/browser.ts：Web 宿主降级实现（构建期内置插件 + 运行期启停）。
+- plugins/{hello,provider-clock,consumer-greeting}：M1/M2 示例插件，esbuild 打成单文件 CJS。
+- scripts/build.mjs：插件 → CJS 单文件；宿主 → Node CJS + Web ESM。
+  forbid-vscode 插件把 import 'vscode' 变成构建错误。
+- scripts/smoke-built-plugins.mjs：对**构建产物**（而非源码）断言契约，
+  含「产物里不得出现 require("vscode")」这条机器化检查。
+- .vscode/{launch,tasks,settings}.json：F5 一键调试。
+- .github/workflows/ci.yml：typecheck + test + build + smoke。
+
+修复（均由测试或实现评审逼出，不是想象出来的问题）
+- EffectStack.add() 返回的句柄语义错误：dispose() 只把条目从队列摘出、却不执行逆操作。
+  而「桥接层自动登记 + 插件再包一层 ctx.effect」正是最常见写法，会导致卸载时命令**根本不被撤销**，
+  直接摧毁「卸载后无残留」这条验收标准。
+- ServiceRegistry.revoke() 不清理空槽位：插件反复启停会让 #slots 持续膨胀，属于典型卸载残留。
+- CordisPlugin.inject 原本是个**空字段**（陷阱：作者写的声明不生效且不报错）。
+  现已真正参与依赖解析，采用两道判定：清单预检可在模块求值前拦下；
+  inject 必须加载模块后才能读到，若仍缺依赖则**释放模块**再 parked。
+
+验证
+- pnpm run verify 全绿：tsc 0 错误 / 59 项测试 / 3 个插件 + 2 个宿主产物构建成功 / 产物冒烟通过。
+- 诚实声明：桥接层（bridge.ts）需要真实 vscode 模块，因此仅由 tsc 与手动验收覆盖
+  （用户决策不跑 @vscode/test-electron e2e）；手动步骤见 docs/acceptance-m1-m2.md。
+- Web 入口只验证了「能构建成不含 Node 内建的 ESM」，**未做浏览器实测**。
+
+决策记录：docs/adr/0010-host-layer-decisions.md
+（Web ESM 入口 / inject 合并策略 / 桥接层自动登记语义 / 权限在调用时刻校验）

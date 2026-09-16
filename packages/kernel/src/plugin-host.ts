@@ -9,7 +9,6 @@ import type {
 import { createPluginContext } from './context.ts'
 import { EffectStack } from './effect-stack.ts'
 import { IsolationUnavailableError, PluginAlreadyLoadedError } from './errors.ts'
-import type { NormalizedManifest } from './manifest.ts'
 import type { HostPort, LoadedPluginModule, PluginEntry, PluginSource } from './ports.ts'
 import { ServiceRegistry, type ServiceChangeEvent } from './service-registry.ts'
 import { withTimeout } from './timing.ts'
@@ -212,13 +211,15 @@ export class PluginHost {
 
   async #activate(record: PluginRecord, reason: string): Promise<void> {
     const manifest = record.entry.manifest
-    const missing = this.#missingDependencies(manifest)
-    record.missing = missing
-    if (missing.length > 0) {
-      this.#setState(record, 'paused', `${reason}：等待依赖 ${missing.join(', ')}`)
+
+    // 第一道判定：只看清单的**便宜预检** —— 缺依赖就连模块都不加载（不让模块级代码白跑一遍）。
+    const preMissing = this.#missingDependencies(record)
+    if (preMissing.length > 0 && record.loaded === undefined) {
+      record.missing = preMissing
+      this.#setState(record, 'paused', `${reason}：等待依赖 ${preMissing.join(', ')}`)
       return
     }
-    if (record.state !== 'paused') this.#setState(record, 'loading', reason)
+    this.#setState(record, 'loading', reason)
 
     const effects = new EffectStack({
       label: manifest.id,
@@ -241,6 +242,18 @@ export class PluginHost {
     try {
       const loaded = await this.#port.loadModule(record.entry)
       record.loaded = loaded
+
+      // 第二道判定：模块已就位，现在能读到 `plugin.inject` 了，合并后重新判定。
+      // 若仍缺依赖，必须**释放模块**再 parked —— 代价是模块级代码已经求值过一次，
+      // 这正是"清单声明才是权威"的原因（ADR-0010 决策 2）。
+      const missing = this.#missingDependencies(record)
+      if (missing.length > 0) {
+        record.missing = missing
+        await this.#release(record)
+        this.#setState(record, 'paused', `${reason}：等待依赖 ${missing.join(', ')}`)
+        return
+      }
+
       const ctx = createPluginContext({
         id: manifest.id,
         manifest,
@@ -340,7 +353,7 @@ export class PluginHost {
   async #resumeReady(reason: string): Promise<void> {
     for (const record of [...this.#records.values()]) {
       if (record.state !== 'paused') continue
-      const missing = this.#missingDependencies(record.entry.manifest)
+      const missing = this.#missingDependencies(record)
       record.missing = missing
       if (missing.length > 0) continue
       try {
@@ -355,9 +368,22 @@ export class PluginHost {
     }
   }
 
-  #missingDependencies(manifest: NormalizedManifest): readonly ServiceName[] {
+  /**
+   * 依赖声明有两个来源（ADR-0010 决策 2）：
+   * - `plugin.json#dependencies`（**权威**：能在模块求值之前拦下）；
+   * - `CordisPlugin.inject`（cordis 风格；必须模块已加载才能读到，缺省范围 `*`）。
+   */
+  #declaredDependencies(record: PluginRecord): Record<string, string> {
+    const declared: Record<string, string> = { ...record.entry.manifest.dependencies }
+    for (const name of record.loaded?.plugin.inject ?? []) {
+      if (declared[name] === undefined) declared[name] = '*'
+    }
+    return declared
+  }
+
+  #missingDependencies(record: PluginRecord): readonly ServiceName[] {
     const missing: ServiceName[] = []
-    for (const [name, range] of Object.entries(manifest.dependencies)) {
+    for (const [name, range] of Object.entries(this.#declaredDependencies(record))) {
       if (!this.#registry.canResolve(name, range)) missing.push(name)
     }
     return missing
