@@ -33,6 +33,12 @@ jobs:
       - name: 验证（typecheck + tests + docs + build + smoke）
         run: pnpm run verify
 
+      # 严格 GC 浸泡默认会被 `node --test` skip（需要 --expose-gc）；在 Node 24 上显式跑，
+      # 避免“严格用例永远 skip”的假绿。Node 22.18 不重复跑（时间敏感度更高）。
+      - name: 严格 GC 浸泡（Node 24）
+        if: matrix.node-version == 24
+        run: pnpm run test:soak:strict
+
       # 打包 + 校验真实 VSIX（强化后的检查器会解出包内 package.json、断言入口非空、
       # 并扫描内联 sourcemap）。
       - name: 打包并校验 VSIX

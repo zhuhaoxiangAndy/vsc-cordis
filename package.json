@@ -11,6 +11,7 @@
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "test": "node --test \"packages/*/test/*.spec.ts\"",
+    "test:soak:strict": "node --expose-gc packages/kernel/test/soak.spec.ts",
     "typecheck": "tsc -p tsconfig.check.json",
     "check:docs": "node scripts/check-doc-links.mjs",
     "build": "node scripts/build.mjs",
