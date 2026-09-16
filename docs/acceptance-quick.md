@@ -15,7 +15,7 @@
 
 ```bash
 pnpm install
-pnpm run verify        # 期望：215 项（214 通过 + 1 skip）、8 个构建目标、4 个插件冒烟
+pnpm run verify        # 期望：全部通过（当前 258 项 = 257 通过 + 1 个按设计 skip；数字以实际输出为准）
 ```
 
 在 VSCode 里打开本仓库，按 **F5**（`.vscode/settings.json` 已把 `vscordis.pluginRoots`
