@@ -68,6 +68,8 @@
 - **隔离子进程畸形 IPC 可终止宿主进程**：`process.send(null)` 会让 `message.kind` 抛 `TypeError`
   进宿主事件循环（Extension Host DoS）。现在消息入口做结构校验、`#handle` 包 try/catch，
   畸形消息只失败该会话；启动/激活阶段也会快速 reject，不再干等 readyTimeout。
+  激活后的协议违规同样走 `onUnexpectedExit` 把 `PluginHost` 记录转 `failed`，不会留下
+  “进程已死但状态 active”。
 - **隔离路径下 `vscode:workspace.read` 未生效**：无权限插件也能拿到 `workspaceFolders`。
   现在宿主侧无权限不预取、子进程侧同步拒绝。
 - **last-wins 的被替换者卸载会删掉接管者的远程路由**：路由清理现在校验代际 token，

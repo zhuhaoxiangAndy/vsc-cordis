@@ -731,6 +731,42 @@ test('隔离边界：激活后子进程异常退出，PluginHost 必须从 activ
   }
 })
 
+test('隔离边界：激活后发送畸形 IPC → 会话终止且宿主状态转 failed', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'bad-ipc-after-active',
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('badipc.now', () => process.send(null)),
+           (d) => d.dispose(),
+           'cmd:badipc.now',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+  const { host, loader } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(host.view('bad-ipc-after-active')?.state, 'active', '哨兵：先激活成功')
+
+    await hostApi.executeCommand('bad-ipc-after-active', 'badipc.now', []).catch(() => undefined)
+
+    const deadline = Date.now() + 3_000
+    while (Date.now() < deadline && host.view('bad-ipc-after-active')?.state !== 'failed') {
+      await sleep(25)
+    }
+    assert.equal(host.view('bad-ipc-after-active')?.state, 'failed', '协议违规后宿主记录不能停在 active')
+    assert.match(host.view('bad-ipc-after-active')?.error ?? '', /违反隔离 IPC 协议/)
+    assert.equal(loader.activeSessions, 0, '协议违规后会话必须退出')
+  } finally {
+    await host.unload('bad-ipc-after-active').catch(() => undefined)
+    await host.settle()
+  }
+})
+
 test('隔离边界：workspaceFolders 需要 vscode:workspace.read（隔离路径也要生效）', async () => {
   const hostApi = new FakeHostApi()
   const entry = await makeFixture(

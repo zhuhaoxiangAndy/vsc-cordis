@@ -1141,6 +1141,9 @@ class IsolatedSession {
     this.#ready.reject(error)
     this.#activated.reject(error)
     this.#failAll(error.message)
+    // 激活后协议违规同样要让宿主记录从 active 变 failed：kill() 会把 #closed 置位，
+    // 子进程退出事件因此不会走 "unexpected" 分支（否则会留下"进程已死但状态 active"）。
+    if (this.#everActivated) this.#options.onUnexpectedExit?.(this.#pluginId, error)
     this.kill()
   }
 
