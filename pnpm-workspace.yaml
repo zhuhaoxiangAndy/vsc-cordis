@@ -1,3 +1,9 @@
 packages:
   - 'packages/*'
   - 'plugins/*'
+
+# pnpm 10+/11 的供应链保护默认拦截所有依赖的安装脚本，需显式放行后才会执行。
+# pnpm 11 使用的键是 allowBuilds（映射形式），并会把它自动写入本文件。
+# 这里只放行 esbuild（需要执行安装脚本落地平台二进制），不使用全放开开关。
+allowBuilds:
+  esbuild: true

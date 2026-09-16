@@ -6,17 +6,19 @@
   "description": "Cordis-style plugin runtime (effect stack + reactive DI) running on top of the VSCode extension host",
   "license": "MIT",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.18"
   },
   "scripts": {
     "test": "node --test \"packages/*/test/*.spec.ts\"",
     "typecheck": "tsc -p tsconfig.check.json",
     "build": "node scripts/build.mjs",
-    "check": "npm run typecheck && npm run test"
+    "build:prod": "node scripts/build.mjs --production",
+    "smoke": "node scripts/smoke-built-plugins.mjs",
+    "verify": "npm run typecheck && npm run test && npm run build && npm run smoke"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
-    "@types/vscode": "^1.95.0",
+    "@types/vscode": "~1.95.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.2"
   }

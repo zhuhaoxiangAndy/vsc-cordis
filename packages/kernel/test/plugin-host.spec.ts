@@ -246,7 +246,7 @@ test('M2：传递闭包 A→B→C 级联暂停、级联恢复（无一行特判�
 
   assert.equal(host.view('B')?.state, 'active')
   assert.equal(host.view('C')?.state, 'active')
-  assert.deepEqual(host.registry.providedServices().sort(), ['clock', 'scheduler'])
+  assert.deepEqual([...host.registry.providedServices()].sort(), ['clock', 'scheduler'])
 })
 
 test('依赖缺失时加载不报错，parked 为 paused；提供者出现后自动激活', async () => {
@@ -308,6 +308,38 @@ test('reload：模块被重新加载、状态保持 active', async () => {
   assert.equal(activations, 2)
   assert.equal(port.moduleReleases.filter((id) => id === 'x').length, 1)
   assert.deepEqual(host.registry.providedServices(), [])
+})
+
+test('CordisPlugin.inject：清单没有 dependencies 时，仅靠 inject 也能正确 parked 并自动恢复', async () => {
+  const port = new FakeHostPort()
+  let activations = 0
+  port.define('inject-only', (): CordisPlugin => ({
+    inject: ['clock'],
+    activate(ctx) {
+      activations += 1
+      ctx.use('clock')
+    },
+  }))
+
+  const host = hostFor(port)
+  const view = await host.load(makeEntry('inject-only')) // 注意：清单里没有任何依赖声明
+
+  assert.equal(view.state, 'paused')
+  assert.deepEqual(view.missing, ['clock'])
+  assert.equal(activations, 0)
+  // 读 inject 需要先加载模块；判定失败后必须把模块释放掉，不能留残留
+  assert.deepEqual(port.moduleReleases, ['inject-only'])
+
+  port.define('provider', (): CordisPlugin => ({
+    activate(ctx) {
+      ctx.provide('clock', 1, { version: '1.0.0' })
+    },
+  }))
+  await host.load(makeEntry('provider'))
+  await host.settle()
+
+  assert.equal(host.view('inject-only')?.state, 'active')
+  assert.equal(activations, 1)
 })
 
 test('deactivate 抛错不阻断回收', async () => {

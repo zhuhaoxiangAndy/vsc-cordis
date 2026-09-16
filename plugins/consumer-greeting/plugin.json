@@ -1,0 +1,15 @@
+{
+  "id": "consumer-greeting",
+  "name": "Greeting Consumer (M2)",
+  "version": "1.0.0",
+  "description": "消费 clock 服务；提供者卸载时自动暂停，提供者恢复时自动重建并注入新实例",
+  "main": "dist/index.cjs",
+  "trust": "trusted",
+  "dependencies": {
+    "clock": "^1.0.0"
+  },
+  "permissions": [
+    "vscode:commands.register",
+    "vscode:window.messages"
+  ]
+}

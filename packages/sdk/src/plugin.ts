@@ -40,7 +40,8 @@ export function resolvePluginExport(exported: unknown): CordisPlugin {
   if (typeof normalized.activate !== 'function') {
     throw new InvalidPluginExportError('缺少 activate(ctx) 函数')
   }
-  return normalized
+  // 只在此处收窄：activate 已做运行期校验，其余字段（inject / name / deactivate）按接口的可选语义处理。
+  return normalized as unknown as CordisPlugin
 }
 
 function normalize(value: unknown, depth: number): Record<string, unknown> {

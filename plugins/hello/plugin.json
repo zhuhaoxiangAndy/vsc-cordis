@@ -1,0 +1,13 @@
+{
+  "id": "hello",
+  "name": "Hello (M1 PoC)",
+  "version": "1.0.0",
+  "description": "最小 PoC：通过 ctx.effect 注册命令与输出通道，卸载后全部逆序回收",
+  "main": "dist/index.cjs",
+  "trust": "trusted",
+  "permissions": [
+    "vscode:commands.register",
+    "vscode:window.messages",
+    "vscode:window.output"
+  ]
+}

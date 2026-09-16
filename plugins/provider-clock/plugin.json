@@ -1,0 +1,9 @@
+{
+  "id": "provider-clock",
+  "name": "Clock Provider (M2)",
+  "version": "1.0.0",
+  "description": "提供 clock 服务；卸载后消费者自动暂停，重新加载后消费者自动恢复并拿到新实例",
+  "main": "dist/index.cjs",
+  "trust": "trusted",
+  "permissions": ["vscode:commands.register"]
+}

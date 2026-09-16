@@ -1,0 +1,4 @@
+{
+  "vscordis.pluginRoots": ["${workspaceFolder}/plugins"],
+  "vscordis.autoLoad": true
+}

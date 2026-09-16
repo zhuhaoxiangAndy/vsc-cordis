@@ -3,6 +3,7 @@
   "displayName": "VSCordis",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Cordis-style plugin runtime for VSCode: dynamic load / unload / hot reload with reactive dependency injection",
   "publisher": "vscordis-dev",
   "license": "MIT",
@@ -15,7 +16,7 @@
   },
   "categories": ["Other"],
   "main": "./dist/extension.cjs",
-  "browser": "./dist/web/extension.cjs",
+  "browser": "./dist/web/extension.js",
   "activationEvents": ["onStartupFinished"],
   "contributes": {
     "commands": [
@@ -62,7 +63,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
-    "@types/vscode": "^1.95.0",
+    "@types/vscode": "~1.95.0",
     "esbuild": "^0.24.0"
   }
 }

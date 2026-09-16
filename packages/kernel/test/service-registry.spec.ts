@@ -74,7 +74,7 @@ test('affectedBy：硬依赖的传递闭包（A→B→C）', () => {
   registry.provide('B', 'scheduler', 'scheduler-instance', { version: '1.0.0' })
   registry.depend('C', 'scheduler', 'hard')
 
-  assert.deepEqual(registry.affectedBy('A').sort(), ['B', 'C'])
+  assert.deepEqual([...registry.affectedBy('A')].sort(), ['B', 'C'])
   assert.deepEqual(registry.affectedBy('B'), ['C'])
 
   registry.provide('D', 'other', 1, { version: '1.0.0' })

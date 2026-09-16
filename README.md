@@ -2,21 +2,37 @@
 
 把 [Cordis](https://github.com/cordiverse/cordis) 的「时空可组合性」迁移到 VSCode 扩展开发：
 在 Extension Host 之上运行一个微型插件运行时，使业务功能以**插件**形式动态加载、卸载、热重载，
-通过声明式 `inject` 声明依赖，服务提供者变化时自动协调依赖方。
+通过声明式依赖声明服务依赖，服务提供者变化时自动协调依赖方。
 
 - **时间可组合性**：所有副作用经 `ctx.effect` 登记，由 `EffectStack` 以 LIFO 逆序回收。
 - **空间可组合性**：服务经 `ServiceRegistry` 提供/注入，维护依赖图，提供者变化时自动暂停/恢复消费者。
 - **不修改 VSCode 源码，不使用非公开 API。** 宿主本身是一个普通 VSCode 扩展。
 
+```
+* 当前进度：里程碑 1（PoC）与里程碑 2（依赖注入协调）已完成并通过自动化验证。
+* 里程碑 3（文件监听热重载）、4（安全沙箱）、5（CLI）尚未开始 —— 见 docs/acceptance-m1-m2.md 的未覆盖清单。
+```
+
 ## 目录
 
 | 路径 | 包名 | 职责 |
 | --- | --- | --- |
-| `packages/sdk` | `@vscordis/sdk` | **契约层**：`PluginContext` / `CordisPlugin` / `plugin.json` / 权限 / 受控 API 类型。零 Node 依赖。 |
-| `packages/kernel` | `@vscordis/kernel` | **实现层**：`EffectStack` / `ServiceRegistry` / `PluginHost` / 状态机。零 `vscode` 依赖，可在纯 Node 与 Web Worker 中运行。 |
+| `packages/sdk` | `@vscordis/sdk` | **契约层**：`PluginContext` / `CordisPlugin` / `plugin.json` / 权限 / 受控 API 类型。零运行时依赖。 |
+| `packages/kernel` | `@vscordis/kernel` | **实现层**：`EffectStack` / `ServiceRegistry` / `PluginHost` / 状态机。零 `vscode`、零 Node 依赖。 |
 | `packages/host` | `vscordis` | **唯一发布单元**：VSCode 扩展。把真实 API 桥接成受控面，负责加载/卸载/依赖协调。 |
-| `plugins/*` | — | 示例与测试插件（esbuild 打成单文件 CJS）。 |
-| `docs/adr` | — | 架构决策记录，每条决策含权衡与否决方案。 |
+| `plugins/*` | — | 示例插件（esbuild 打成单文件 CJS）。 |
+| `docs/adr` | — | 架构决策记录，每条含权衡与否决方案。 |
+| `docs/acceptance-m1-m2.md` | — | M1/M2 的手动验收步骤与未覆盖范围。 |
+
+## 快速开始
+
+```bash
+pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
+pnpm run verify                    # 类型检查 + 59 项测试 + 构建 + 产物冒烟
+```
+
+在 VSCode 中打开本仓库，按 **F5**（`运行 vscordis 扩展（M1/M2 手动验收）`），
+然后 `Ctrl+Shift+P` 输入 `VSCordis`。完整验收步骤见 `docs/acceptance-m1-m2.md`。
 
 ## 能力矩阵（诚实版）
 
@@ -24,27 +40,36 @@
 | --- | --- | --- |
 | 同进程受控 API 插件 | ✅ | ✅ |
 | 运行期加载磁盘上的插件 | ✅ | ❌ 浏览器无法运行期加载代码，仅支持**构建期内置**插件 |
-| 子进程隔离（untrusted） | ✅ `child_process.fork` | ❌ 直接拒绝加载（fail-closed） |
-| 热重载 | ✅ | 仅内置插件启停 |
+| 子进程隔离（untrusted） | ⏳ M4 | ❌ 直接拒绝加载（fail-closed） |
+| 文件监听自动热重载 | ⏳ M3 | 不适用 |
+| 手动 reload（拿到新模块实例） | ✅ | ✅（内置插件重新取工厂产物） |
 
-## 已知硬限制
+## 已知硬限制（均有 ADR 与一手证据）
 
-1. **运行时注册的命令不会出现在命令面板**：命令面板条目来自静态 `contributes.commands`（MenuRegistry），
+1. **运行时注册的命令不会出现在命令面板**：面板条目来自静态 `contributes.commands`（MenuRegistry），
    只有 `vscode.commands.getCommands(true)` 能反映运行期注册表。宿主为此提供 `vscordis: 运行插件命令…`
    作为动态入口。详见 `docs/adr/0002`。
 2. **同进程插件可以绕过受控 API**：扩展宿主把 `vscode` 模块注入给任何扩展目录下的模块，
    `trust: trusted` 的插件在安全上**只防误用、不防恶意**；真正的边界是子进程。详见 `docs/adr/0003`。
 3. **Node 权限模型没有网络开关**：`--permission` 可限制 `fs`/`child-process`/`worker`/`addons`，
-   但**无法限制 `net`**，网络只能靠 require 拦截 + 审计。详见 `docs/adr/0005`。
+   但**无法限制 `net`**，网络只能靠 require 拦截 + 审计（M4）。详见 `docs/adr/0005`。
 4. **VSCode 官方不支持运行期卸载单个扩展**，因此本项目的卸载粒度是「扩展内部的插件」，不是扩展本身。
+5. **Web 端无法运行期加载代码**，且 Web 扩展宿主里 `require` 不可用（入口必须为 ESM）。详见 `docs/adr/0006` 与 `0010`。
 
-## 开发
+## 从 Cordis 继承了什么、刻意分歧了什么
 
-```bash
-npm install          # 仅需要 typescript / esbuild / @types/*
-npm test             # Node 内置 test runner，直接跑 .ts（Node >= 22.13 原生类型剥离）
-npm run typecheck
-npm run build        # 构建宿主扩展与示例插件
-```
+| Cordis | 本项目 | 理由 |
+| --- | --- | --- |
+| `ctx.effect(cb)` 返回 disposer | `ctx.effect(register, dispose)` + `ctx.effectAsync` | `register` 必须同步，否则"拿到句柄"与"登记逆操作"之间的 await 窗口会导致资源逃逸 |
+| fiber 顶层 disposer 逆序启动 + `Promise.all` 并发 | **严格 LIFO + 串行 `await`** | 并发回收会让"先释放 A、再释放依赖 A 的 B"退化成竞态 |
+| `ctx.inject(deps, cb)` 细粒度重入 | 插件级 `paused`/`active` | VSCode 的命令表是全局的，细粒度重入会让命令"闪现"（ADR-0007） |
+| 同名 service 在同一 isolate 内重复即抛错 | 默认 `exclusive`，可显式 `last-wins` | 与 cordis 一致，并补上显式接管路径 |
+| `ctx.set` 要求同一 fiber 已 provide | 合并为 `ctx.provide` | 减少概念数量；两者差异在 VSCode 场景下没有实际收益 |
 
-在 VSCode 中按 `F5` 启动 Extension Development Host。
+## 开发约定
+
+- 测试用 **Node 内置 `node:test`** + 原生类型剥离，零测试框架依赖、无网络也可跑（ADR-0009）。
+- 因为类型剥离不支持不可擦除语法，代码里禁用 `enum` / `namespace` / 构造函数参数属性 / 装饰器；
+  相对导入必须带 `.ts` 扩展名；跨包引用只能是 `import type`（由 `verbatimModuleSyntax` 强制）。
+- `scripts/*.ps1` 必须保持 **ASCII-only**：PowerShell 5.1 会按 ANSI 代码页解码无 BOM 的 `.ps1`，
+  中文会把后面的引号字节吞掉。中文提交信息走 `scripts/commit-messages/*.txt` + `git commit -F`。
