@@ -538,3 +538,29 @@ test('settle：必须等到级联产生的后续任务完成，而不是单次 n
     await host.dispose()
   }
 })
+
+test('reportExternalFailure：外部资源死亡后把记录标成 failed 并回收宿主侧副作用', async () => {
+  const port = new FakeHostPort()
+  let effects: PluginContext['effects'] | undefined
+  port.define('external', (): CordisPlugin => ({
+    activate(ctx) {
+      effects = ctx.effects
+      registerCommandEffect(ctx, 'external.run')
+    },
+  }))
+
+  const host = hostFor(port)
+  try {
+    await host.load(makeEntry('external', { permissions: WITH_COMMAND }))
+    assert.equal(host.view('external')?.state, 'active', '哨兵：先确实 active')
+    assert.deepEqual(port.liveCommands(), ['external.run'])
+
+    await host.reportExternalFailure('external', '子进程异常退出')
+    assert.equal(host.view('external')?.state, 'failed', '外部失败必须可见')
+    assert.match(host.view('external')?.error ?? '', /子进程异常退出/)
+    assert.deepEqual(port.liveCommands(), [], '状态转 failed 时必须回收宿主侧命令')
+    assert.equal(effects?.closed, true, '副作用栈必须已回收')
+  } finally {
+    await host.dispose()
+  }
+})

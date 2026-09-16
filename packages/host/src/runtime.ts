@@ -100,6 +100,13 @@ export class Runtime {
       inheritEnv: vscode.workspace
         .getConfiguration('vscordis')
         .get<boolean>('isolation.inheritEnv', false),
+      onUnexpectedExit: (pluginId, error) => {
+        this.bridge.log('error', `隔离插件 ${pluginId} 子进程异常退出：${describe(error)}`)
+        // 交给 PluginHost 的串行队列处理：把记录从 active 改成 failed，并回收宿主侧副作用。
+        void this.host.reportExternalFailure(pluginId, error.message).catch((failure: unknown) => {
+          this.bridge.log('error', `标记隔离插件 ${pluginId} failed 时出错：${describe(failure)}`)
+        })
+      },
       onLog: (message) => this.bridge.log('debug', message),
     })
     this.#isolatedLoader = isolatedLoader

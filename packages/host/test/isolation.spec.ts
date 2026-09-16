@@ -351,6 +351,9 @@ async function makeHost(
   // 注册表必须由测试显式创建并与 PluginHost **共用**：隔离加载器要往同一张表里
   // 注册远程服务，否则消费者登记的依赖边与提供者的条目就不在同一张图上。
   const registry = new ServiceRegistry()
+  // 生产装配里 loader 的 onUnexpectedExit 回调要在 host 创建后才能拿到引用；
+  // 测试用同一个延迟绑定，保证覆盖的是真实接线（而不是测试专用旁路）。
+  let hostRef: PluginHost | undefined
   const loader = new IsolatedPluginLoader({
     hostApi,
     registry,
@@ -360,6 +363,9 @@ async function makeHost(
     disposeTimeoutMs: 3_000,
     disposeBudgetMs: overrides.disposeBudgetMs ?? 0,
     inheritEnv: overrides.inheritEnv ?? false,
+    onUnexpectedExit: (pluginId, error) => {
+      void hostRef?.reportExternalFailure(pluginId, error.message).catch(() => undefined)
+    },
   })
   const port = new IsolationPort(loader)
   const host = new PluginHost({
@@ -368,6 +374,7 @@ async function makeHost(
     disposeTimeoutMs: 4_000,
     disposeBudgetMs: overrides.disposeBudgetMs ?? 0,
   })
+  hostRef = host
   createdHosts.push(host)
   return { host, loader }
 }
@@ -685,6 +692,43 @@ test('隔离边界：畸形 IPC 消息只失败该会话，不能让宿主进程
   assert.equal(loader.sessionsStarted, 1, '会话确实启动过（避免"从未启动"假绿）')
   await sleep(100)
   assert.equal(loader.activeSessions, 0, '畸形消息后子进程必须被终止')
+})
+
+test('隔离边界：激活后子进程异常退出，PluginHost 必须从 active 变 failed', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'crash-after-active',
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('crash.now', () => process.exit(7)),
+           (d) => d.dispose(),
+           'cmd:crash.now',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+  const { host, loader } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(host.view('crash-after-active')?.state, 'active', '哨兵：先确实激活成功')
+
+    // 命令 handler 在子进程里执行 process.exit(7)：宿主侧在途调用必须失败，且状态转 failed
+    await hostApi.executeCommand('crash-after-active', 'crash.now', []).catch(() => undefined)
+
+    const deadline = Date.now() + 3_000
+    while (Date.now() < deadline && host.view('crash-after-active')?.state !== 'failed') {
+      await sleep(25)
+    }
+    assert.equal(host.view('crash-after-active')?.state, 'failed', '子进程崩溃后状态必须可见')
+    assert.match(host.view('crash-after-active')?.error ?? '', /异常退出/)
+    assert.equal(loader.activeSessions, 0, '崩溃后活跃会话必须归零')
+  } finally {
+    await host.unload('crash-after-active').catch(() => undefined)
+    await host.settle()
+  }
 })
 
 test('隔离边界：workspaceFolders 需要 vscode:workspace.read（隔离路径也要生效）', async () => {

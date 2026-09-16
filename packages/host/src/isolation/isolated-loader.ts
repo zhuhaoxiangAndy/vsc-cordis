@@ -128,6 +128,12 @@ export interface IsolatedLoaderOptions {
    */
   readonly inheritEnv?: boolean
   readonly onLog?: (message: string) => void
+  /**
+   * 子进程在**激活成功后**异常退出时的回调（宿主主动 kill / 优雅停用不触发）。
+   * 宿主用它把 `PluginHost` 记录标成 `failed`，避免"进程已死但状态面板仍显示 active"
+   * （ADR-0015：失败必须可见）。
+   */
+  readonly onUnexpectedExit?: (pluginId: string, error: Error) => void
   /** 测试可注入，用来断言 execArgv 的推导结果。 */
   readonly execArgvFor?: (entry: PluginEntry, permissions: ReadonlySet<Permission>) => ExecArgvPlan
 }
@@ -457,6 +463,7 @@ export class IsolatedPluginLoader {
           disposeTimeoutMs: this.#options.disposeTimeoutMs ?? 2_000,
           disposeBudgetMs: this.#options.disposeBudgetMs ?? 0,
           inheritEnv: this.#options.inheritEnv ?? false,
+          onUnexpectedExit: this.#options.onUnexpectedExit,
           log: (message) => this.#log(message),
         })
         ref.session = session
@@ -517,6 +524,8 @@ interface SessionOptions {
   readonly disposeBudgetMs: number
   /** 是否完整继承宿主 env；见 `IsolatedLoaderOptions.inheritEnv`（ADR-0021）。 */
   readonly inheritEnv: boolean
+  /** 激活成功后子进程异常退出的回调；见 `IsolatedLoaderOptions.onUnexpectedExit`。 */
+  readonly onUnexpectedExit: ((pluginId: string, error: Error) => void) | undefined
   readonly log: (message: string) => void
 }
 
@@ -551,6 +560,8 @@ class IsolatedSession {
   readonly #exited = deferred<void>()
   #requestSeq = 0
   #closed = false
+  /** 是否收到过 `activated`：未激活前异常退出由 start() 自己失败，不触发宿主状态回调。 */
+  #everActivated = false
 
   constructor(options: SessionOptions) {
     this.#options = options
@@ -648,17 +659,27 @@ class IsolatedSession {
 
     this.#exited.promise.catch(() => undefined)
     child.on('exit', (code, signal) => {
+      const detail = `退出码 ${code ?? 'null'} / 信号 ${signal ?? 'none'}`
+      const unexpected = !this.#closed
       // 子进程**异常退出**（崩溃、被外部杀掉）时不会走 kill() 那条优雅路径，
       // 所以在途调用必须在**这里**也失败一次：否则消费者会永远等一个已经死掉的进程
       // （ADR-0019 决策 5 的另一半；kill() 里的 #failAll 只覆盖宿主主动卸载）。
       // 反向验证过：去掉这行，`isolation.spec.ts` 的"子进程异常退出"用例会以
       // "在途调用必须被拒绝，而不是永远挂起"失败。
-      this.#failAll(
-        `插件 ${this.#pluginId} 的子进程已退出（退出码 ${code ?? 'null'} / 信号 ${signal ?? 'none'}），在途调用无法完成`,
-      )
+      this.#failAll(`插件 ${this.#pluginId} 的子进程已退出（${detail}），在途调用无法完成`)
       this.#cleanupHostSide()
-      const detail = `退出码 ${code ?? 'null'} / 信号 ${signal ?? 'none'}`
-      if (!this.#closed) this.#options.log(`[${this.#pluginId}] 子进程退出（${detail}）`)
+
+      if (unexpected) {
+        const error = new Error(`插件 ${this.#pluginId} 的子进程异常退出（${detail}）`)
+        // 启动/激活阶段也要快速失败，而不是干等 readyTimeout；
+        // 已 settle 的 deferred 上 reject 是 no-op。
+        this.#ready.reject(error)
+        this.#activated.reject(error)
+        this.#options.log(`[${this.#pluginId}] ${error.message}`)
+        // 只有"激活成功后"才通知宿主把记录改成 failed；激活前的失败由 load() 自己负责。
+        if (this.#everActivated) this.#options.onUnexpectedExit?.(this.#pluginId, error)
+      }
+
       this.#deactivated.resolve()
       this.#exited.resolve()
     })
@@ -778,6 +799,7 @@ class IsolatedSession {
         this.#ready.resolve()
         break
       case 'activated':
+        this.#everActivated = true
         this.#activated.resolve()
         break
       case 'deactivated':

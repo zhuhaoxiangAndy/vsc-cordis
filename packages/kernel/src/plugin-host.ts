@@ -268,6 +268,25 @@ export class PluginHost {
     })
   }
 
+  /**
+   * 外部资源报告不可恢复失败（当前用于隔离子进程异常退出）。
+   *
+   * 走同一条串行队列，避免与进行中的 load/unload/reload 交错；并复用
+   * `#deactivateTo(..., 'failed')` 的既有清理路径（回收副作用 → 触发服务级联 → 释放模块）。
+   * 没有这条路径时，子进程已死而 `view().state` 仍是 `active`，状态面板与消费者会继续
+   * 以为插件活着（ADR-0015：失败必须可见）。
+   */
+  async reportExternalFailure(id: PluginId, reason: string): Promise<void> {
+    await this.#enqueue(async () => {
+      if (this.#disposed) return
+      const record = this.#records.get(id)
+      if (record === undefined) return
+      if (record.state === 'failed' || record.state === 'idle') return
+      record.error = new Error(reason)
+      await this.#deactivateTo(record, 'failed', `外部失败：${reason}`)
+    })
+  }
+
   async reload(id: PluginId): Promise<PluginView> {
     return await this.#enqueue(async () => {
       this.#assertUsable()
