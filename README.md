@@ -104,6 +104,7 @@ pnpm run sign -- plugins/hello --verify          # 签名 + 立刻用仓库公�
 | 配置读取 | `plugin.json` 声明 `configuration.keys` → 宿主预取快照 + 变化推送，插件侧 `get()` 保持**同步且不陈旧** |
 | 状态栏项 | 本地镜像 + 串行 RPC（读属性同步；未支持的属性**响亮抛错**） |
 | 文档保存事件 | `ctx.async.onDidSaveTextDocument` —— **两种模式签名一致**的显式异步面（正文按需取，见 ADR-0018） |
+| 活动编辑器变化 | `ctx.async.onDidChangeActiveTextEditor` —— 与保存事件共用同一套文档句柄；**没有活动编辑器时回调 `undefined`**（ADR-0018） |
 | 提供服务 | `ctx.provide` 可用：宿主把**异步代理**注册进自己的注册表（`remote: true`），依赖协调与级联暂停对远程服务一样有效 |
 | 取用服务 | 隔离提供者 → `ctx.async.useService(name)`（方法全异步）；同进程提供者 → **明确拒绝**（活对象过不了进程边界） |
 
@@ -148,6 +149,19 @@ vscordis 依赖图：4 个插件，1 个服务
 静态图的**硬边界**（CLI 会把它打在输出里）：服务的**版本**由运行期 `ctx.provide(name, value, {version})`
 决定，清单里没有，所以图只能校验"有没有提供者"；隔离插件不参与服务依赖。详见 `docs/adr/0014-cli-and-provides.md`。
 
+`tree` / `list` 还会把插件的 `engines.vscordis` 与**仓库内宿主版本**（读 `packages/host/package.json`）比对，
+不匹配给一条 **warning** —— 这是提前提示，真正的强制点在加载期（ADR-0017）。
+
+## 宿主设置（`settings.json`）
+
+| 设置 | 默认 | 作用 |
+| --- | --- | --- |
+| `vscordis.disposeTimeoutMs` | 2000 | 单个副作用回收的超时；超时记错误但继续回收 |
+| `vscordis.disposeBudgetMs` | 30000 | **单个插件**整栈回收的总预算；超出后剩余 teardown 跳过并逐项记日志（ADR-0015）。设为 `0` 关闭 |
+| `vscordis.activationTimeoutMs` | 15000 | `activate()` 的时限（活性保护：串行队列下没有它会被一个挂死的插件永久卡住，ADR-0015） |
+| `vscordis.hotReload` / `vscordis.hotReloadDebounceMs` | true / 150 | 文件监听热重载开关与防抖窗口（ADR-0011） |
+| `vscordis.isolation.permissionModel` | true | untrusted 插件是否启用 Node 权限模型；**这是隔离方案里唯一未在真实 VSCode 实测过的假设**，降级后果见 `docs/acceptance-m4b.md` |
+
 ## 能力矩阵（诚实版）
 
 | 能力 | Desktop / Remote 宿主 | Web 宿主 (vscode.dev) |
@@ -156,6 +170,7 @@ vscordis 依赖图：4 个插件，1 个服务
 | 运行期加载磁盘上的插件 | ✅ | ❌ 浏览器无法运行期加载代码，仅支持**构建期内置**插件 |
 | 文件监听自动热重载 | ✅（`npm run watch` + `vscordis.hotReload`） | 不适用 |
 | 手动 reload（拿到新模块实例） | ✅ | ✅（内置插件重新取工厂产物） |
+| 显式异步面 `ctx.async`（事件 + 跨进程服务） | ✅ | ✅（同一份 kernel 实现，签名一致） |
 | 子进程隔离（untrusted） | ✅ M4b（`docs/acceptance-m4b.md`） | ❌ 直接拒绝加载（fail-closed） |
 | 签名与哈希校验 | ✅ M4a（`docs/signing.md`） | ✅ 同一实现（平台无关） |
 

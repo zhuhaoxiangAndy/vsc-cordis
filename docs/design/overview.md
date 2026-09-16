@@ -108,9 +108,10 @@ idle ──load──► loading ──► active ⇄ paused
 | 边界强度 | **只防误用**：宿主会把 `vscode` 注入给扩展目录下任何模块 | **真边界**：子进程里没有 `vscode`，fs 受 Node 权限模型限制 |
 | 副作用回收 | `EffectStack` LIFO（尽力而为：清缓存不强制回收可达闭包） | 同一套 `EffectStack` + 进程退出兜底 |
 | `vscode` API | 受控代理（权限在**调用时刻**校验） | RPC 代理，命令 handler 走**反向调用** |
-| `ctx.async`（显式异步面） | ✅ 同一份签名 | ✅ 同一份签名（ADR-0018） |
-| 服务（`provide`/`use`） | ✅ 活对象 | `provide` ✅（注册为 `remote: true` 的异步代理）；`use` 需走 `ctx.async.useService`（ADR-0019） |
-| 服务 | ✅ | ❌ 明确抛错（服务是进程内对象，跨进程需 IDL） |
+| `ctx.async`（显式异步面） | ✅ 同一份签名（保存事件、活动编辑器变化） | ✅ 同一份签名（ADR-0018） |
+| 事件载荷 | 真实 `TextDocument` 直接适配成纯数据 | 纯数据 + 宿主侧**文档句柄**；正文按需取，句柄有生命周期（64 个上限、按插件归属校验） |
+| 服务（`provide`/`use`） | ✅ 活对象 | `provide` ✅（注册为 `remote: true` 的异步代理，带**代际 token**）；`use` 必须走 `ctx.async.useService`（ADR-0019） |
+| 服务跨进程边界 | — | 同步入口（`ctx.use`/`tryUse`）**明确抛错**并给出替代路径；不存在"看起来同步、实际异步"的代理 |
 | 无后端时 | — | **拒绝加载**（fail-closed，绝不降级到同进程） |
 
 路由发生在 `Runtime` 的组合 loader 里：`bridge.ts` 一行都不需要知道隔离的存在。
@@ -152,6 +153,8 @@ idle ──load──► loading ──► active ⇄ paused
 | 加一个权限 | `sdk/permission.ts` + `kernel/permissions.ts` | 跑 `permission-parity.spec.ts` |
 | 改依赖协调语义 | `kernel/plugin-host.ts` | ADR-0007 的四条决策都要一起看；改完必须跑 `races.spec.ts` 与 `soak.spec.ts` |
 | 加隔离模式能力 | `isolation/{protocol,child-bootstrap,isolated-loader,vscode-host-api}.ts` | 四处都要动；`ISOLATION_UNSUPPORTED` 里的说明要同步 |
+| 加一个 `ctx.async` 事件 | `sdk/context.ts`（类型）+ `kernel/context.ts`（同进程适配）+ `isolation/{protocol,child-bootstrap,isolated-loader,vscode-host-api}.ts` + `bridge.ts`（同步入口的代理与权限） | 事件载荷必须能过 structured clone；正文用句柄按需取；同步入口要给出替代路径；改完跑 `isolation.spec.ts` 与 `async-api.spec.ts` |
+| 改服务语义 | `kernel/service-registry.ts` + `kernel/context.ts` + `isolation/isolated-loader.ts` | 同步/异步/远程三条路径要一起改（ADR-0019）；`tryResolve` 与 `resolve` 的语义差异是刻意的 |
 | 改热重载判定 | `host/watcher.ts` 的 `planReload` | 它是纯函数，先加测试 |
 | 加 CI 检查 | `.github/workflows/ci.yml` | |
 
