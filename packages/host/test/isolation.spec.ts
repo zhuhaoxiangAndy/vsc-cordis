@@ -1184,19 +1184,18 @@ test('ADR-0019：隔离插件提供服务 → 另一个隔离插件通过 ctx.as
   }
 })
 
-test('ADR-0019：同进程消费者用 ctx.use 取远程服务 → 明确拒绝（并指向异步面）', async () => {
+test('ADR-0019：远程服务在同步 resolve 入口被拒绝（同进程 ctx.use 的底层路径）', async () => {
   const hostApi = new FakeHostApi()
   const provider = await makeFixture('svc-provider2', CLOCK_PROVIDER)
 
-  const { host, loader } = await makeHost(hostApi)
-  // 让 port 按 trust 路由：同进程插件走 fake 的工厂表，隔离插件走真实子进程
+  const { host } = await makeHost(hostApi)
   try {
     await host.load(provider)
     await host.settle()
 
-    const fake = loader as unknown as { fake?: never }
-    void fake
-    // 直接在注册表上验证同步解析被拒绝（等价于同进程插件调用 ctx.use 时的结果）
+    // 真实 Runtime 会把同进程插件路由到 NodeModuleLoader；makeHost 里所有 fixture 都走隔离加载器，
+    // 无法在同一个 host 里构造"同进程消费者"。但同进程插件 ctx.use 最终落到 registry.resolve，
+    // 所以这里钉住权威拒绝点：远程服务不能被同步解析。
     assert.throws(() => host.registry.resolve('clock'), (error: unknown) => {
       assert.match(String(error), /由隔离插件/)
       assert.match(String(error), /ctx\.async\.useService/)

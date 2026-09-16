@@ -112,14 +112,22 @@ test('I3：单个 teardown 抛错不阻断其余回收', async () => {
 
 test('I3：teardown 超时被记为失败但不阻断回收', async () => {
   const failures: unknown[] = []
+  const order: string[] = []
   const stack = new EffectStack({ disposeTimeoutMs: 20, onError: (error) => void failures.push(error) })
-  stack.add(() => new Promise<void>(() => {  /* 永不 resolve */ }), 'hang')
-  stack.add(() => undefined, 'after')
+  // LIFO：最后登记的 hang 先执行并超时；先登记的 tail 必须仍被回收（哨兵）。
+  stack.add(() => void order.push('tail'), 'tail')
+  stack.add(() => {
+    order.push('hang')
+    return new Promise<void>(() => {
+      /* 永不 resolve */
+    })
+  }, 'hang')
 
   await stack.dispose()
 
   assert.equal(failures.length, 1)
   assert.match(String(failures[0]), /超时/)
+  assert.deepEqual(order, ['hang', 'tail'], '超时项之后的剩余项必须继续执行，不能被静默跳过')
   assert.equal(stack.size, 0)
 })
 

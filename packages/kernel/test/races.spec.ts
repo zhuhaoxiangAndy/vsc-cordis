@@ -194,8 +194,12 @@ test('竞态：dispose 与 load 并发 → load 被拒绝，dispose 正常完成
   port.define('late', (): CordisPlugin => ({ activate() {} }))
   const host = hostFor(port)
 
-  await host.dispose()
-  await assert.rejects(host.load(makeEntry('late')), /已 dispose/)
+  // 真正并发发起：dispose 先入队，load 紧随其后；load 必须被 disposed 门禁拒绝。
+  const disposing = host.dispose()
+  const loading = host.load(makeEntry('late'))
+  await assert.rejects(loading, /已 dispose/)
+  await disposing
+  assert.deepEqual(host.list(), [])
 })
 
 test('竞态：已 dispose 的宿主上再 unload 不抛错（幂等清理路径）', async () => {

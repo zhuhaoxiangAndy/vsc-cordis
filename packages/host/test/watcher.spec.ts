@@ -173,9 +173,15 @@ test('dispose 之后不再产生任何计划（防止卸载后的幽灵重载）
   const plans: unknown[] = []
   const watcher = new PluginWatcher({ roots: () => [scratch], debounceMs: 40, onPlan: (plan) => void plans.push(plan) })
   watcher.refresh()
-  watcher.dispose()
 
+  // 哨兵：先证明监听确实工作。否则"dispose 后无计划"可能只是"监听从未工作"。
   await writeFixture(pluginDir, 'v2')
+  await waitFor(() => plans.length > 0)
+  assert.ok(plans.length > 0, 'dispose 之前必须真的收到过计划，否则本用例没有证明力')
+  plans.length = 0
+
+  watcher.dispose()
+  await writeFixture(pluginDir, 'v3')
   await new Promise((resolve) => setTimeout(resolve, 250))
 
   assert.deepEqual(plans, [])
