@@ -174,14 +174,26 @@ export function errorToWire(error: unknown): string {
  *
  * 同进程消费者代理（宿主侧）与隔离消费者代理（子进程侧）共用它，保证文案一致。
  */
+export function assertCloneableValue(what: string, value: unknown): void {
+  const problem = inspectCloneable(value)
+  if (problem !== undefined) throw new Error(formatCloneProblem(what, problem))
+}
+
 export function assertCloneableArgs(service: string, method: string, args: readonly unknown[]): void {
   for (let index = 0; index < args.length; index += 1) {
-    const problem = inspectCloneable(args[index])
-    if (problem !== undefined) {
-      throw new Error(
-        formatCloneProblem(`远程服务 "${service}" 的方法 "${method}" 的第 ${index} 个参数`, problem),
-      )
-    }
+    assertCloneableValue(`远程服务 "${service}" 的方法 "${method}" 的第 ${index} 个参数`, args[index])
+  }
+}
+
+/**
+ * 命令方向的同一套校验（invoke 参数 / result 返回值）。
+ *
+ * 命令与服务走的是同一条 IPC，只是方向相反：参数 host→child、返回值 child→host。
+ * 分开命名是为了让错误信息说清"这是哪个命令"，同时复用同一份 `inspectCloneable` 口径。
+ */
+export function assertCloneableCommandArgs(command: string, args: readonly unknown[]): void {
+  for (let index = 0; index < args.length; index += 1) {
+    assertCloneableValue(`命令 "${command}" 的第 ${index} 个参数`, args[index])
   }
 }
 

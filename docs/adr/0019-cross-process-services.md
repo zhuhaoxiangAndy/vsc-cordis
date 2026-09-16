@@ -168,7 +168,41 @@ IPC 用 `serialization: 'advanced'`（structured clone），所以：
 
 边界（刻意保守）：装箱原始值（`new Number(7)`）被拒绝（Node 能保留、浏览器规范可能降级为原始值），
 文案引导改传原始值；symbol 键、非枚举属性、Date/RegExp/Map/Set/Error 的自定义字段属于
-"静默丢弃但不报错"，不在校验面内。命令（`invoke`）方向的参数/返回值**尚未**做同样校验（见"未覆盖"）。
+"静默丢弃但不报错"，不在校验面内。命令方向的同一套校验见**决策 12**。
+
+### 决策 12：命令方向复用同一套 structured clone 前置校验
+
+命令与服务走**同一条 IPC**，只是方向相反：参数 host→child（`invoke`）、返回值 child→host（`result`）。
+本轮把 `inspectCloneable` 的口径套到命令上：
+
+- 宿主侧 `IsolatedSession.invokeCommand` 发送前校验参数（`assertCloneableCommandArgs`）；
+- 子进程侧命令 handler 的返回值在回传前校验（`describeCloneProblem`），并保留发送兜底
+  （Proxy 等认不出的值也必须给出失败应答，不能让宿主永远等 `requestId`）；
+- 子进程侧 `ctx.vscode.commands.executeCommand` 的参数（child→host 方向）同样校验。
+
+文案统一为「命令 "x.y" 的第 N 个参数 / 返回值 不可 structured clone：路径 原因」。
+测试覆盖两个方向：参数里带函数、返回值里带函数。
+
+### 决策 13：远程服务代际锚定 —— 旧代理不得静默调用新提供者
+
+**发现**：`#remoteServices` 只按**服务名**路由，且代理的调用在**调用时刻**才查表。
+于是 last-wins 换人后，一个在上一代取用的代理会悄悄把调用发给新提供者 ——
+调用成功、结果却来自另一个插件。对插件消费者来说，级联暂停通常会把旧代理收走；
+但**非依赖系统持有的代理**（宿主内部代码、直接 `registry.resolveForAsync` 的调用方）
+以及"替换事件排队期间的在途调用"不受这条保护。
+
+**修法（两道）**：
+
+1. 宿主侧代理在创建时锚定**代际 token**（每次 `provide` 自增），调用时比对；
+   过期即抛「提供者已被替换（last-wins）…请重新 `ctx.async.useService(name)`」。
+2. 隔离消费者的 RPC 也带 token：`services.use` 的应答返回 token，`services.invoke`
+   的第 4 个参数把它带回来 —— 否则跨进程这条路径仍然按名字路由。
+3. 顺带修一个顺序问题：`#provideRemote` 原本**先写路由表、再注册**；
+   若 `registry.provide` 抛 `ServiceConflictError`（exclusive 冲突），路由表会指向一个
+   从未生效的提供者。现在只有注册成功后才更新路由表。
+
+**测试**：A 提供 → 取用旧代理 → B 显式 last-wins 接管 → 新取用拿到 B，
+而**旧代理的调用必须失败**（没有修复时它会返回 B 的结果 —— 这正是要消除的静默误路由）。
 
 ## 未覆盖
 

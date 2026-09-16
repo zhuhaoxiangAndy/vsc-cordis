@@ -7,6 +7,7 @@ import { buildExecArgv, toIsolatedPermissions, type ExecArgvPlan } from './permi
 import {
   PROTOCOL_VERSION,
   assertCloneableArgs,
+  assertCloneableCommandArgs,
   errorToWire,
   type ChildToHost,
   type HostToChild,
@@ -175,8 +176,13 @@ interface IsolatedServiceRouter {
     conflict: 'exclusive' | 'last-wins',
   ): Disposable
   revoke(pluginId: string, name: string): void
-  use(consumerId: string, name: string, effects: EffectScopeApi): readonly string[]
-  invoke(name: string, method: string, args: readonly unknown[]): Promise<unknown>
+  /** 取用并返回方法表 + **代际 token**（客户端调用时必须带回，见 #invokeRemote）。 */
+  use(
+    consumerId: string,
+    name: string,
+    effects: EffectScopeApi,
+  ): { readonly methods: readonly string[]; readonly token: number | undefined }
+  invoke(name: string, method: string, args: readonly unknown[], token: number | undefined): Promise<unknown>
 }
 
 function deferred<T>(): Deferred<T> {
@@ -207,12 +213,21 @@ export class IsolatedPluginLoader {
    */
   readonly #sessions = new Map<string, IsolatedSession>()
   /**
-   * 服务名 → 提供者 id + 方法表（ADR-0019）。
+   * 服务名 → 当前提供者（id + 方法表 + **代际 token**）。
    *
    * 方法表就是那份"IDL-lite"：有了它，消费者的代理才能对**不存在的方法**立刻报错，
    * 而不是把打字错误变成一个跨进程往返。
+   *
+   * `token` 每次 `provide` 自增：代理在创建时锚定它，调用时比对 ——
+   * last-wins 换人后，**过期代理必须响亮失败**而不是静默把调用路由到新提供者
+   * （ADR-0019："提供者换了人"是用户看得见的事件，不能藏起来）。
    */
-  readonly #remoteServices = new Map<string, { providerId: string; methods: readonly string[] }>()
+  readonly #remoteServices = new Map<
+    string,
+    { providerId: string; methods: readonly string[]; token: number }
+  >()
+  /** 服务代际序号：每注册一代提供者 +1。 */
+  #serviceTokenSeq = 0
   readonly #router: IsolatedServiceRouter
 
   constructor(options: IsolatedLoaderOptions) {
@@ -222,7 +237,7 @@ export class IsolatedPluginLoader {
         this.#provideRemote(pluginId, name, version, methods, conflict),
       revoke: (pluginId, name) => this.#revokeRemote(pluginId, name),
       use: (consumerId, name, effects) => this.#useRemote(consumerId, name, effects),
-      invoke: async (name, method, args) => await this.#invokeRemote(name, method, args),
+      invoke: async (name, method, args, token) => await this.#invokeRemote(name, method, args, token),
     }
   }
 
@@ -238,9 +253,9 @@ export class IsolatedPluginLoader {
     methods: readonly string[],
     conflict: 'exclusive' | 'last-wins',
   ): Disposable {
-    this.#remoteServices.set(name, { providerId: pluginId, methods })
+    const token = ++this.#serviceTokenSeq
     const instance = createRemoteServiceInstance(name, methods, (method, args) =>
-      this.#invokeRemote(name, method, args),
+      this.#invokeRemote(name, method, args, token),
     )
     const handle = this.#options.registry.provide(pluginId, name, instance, {
       ...(version === undefined ? {} : { version }),
@@ -249,6 +264,9 @@ export class IsolatedPluginLoader {
       conflict,
       remote: true,
     })
+    // 只有注册**成功**后才更新路由表：否则 exclusive 冲突抛错时，路由会指向一个
+    // 从未生效的提供者，而注册表里还是旧提供者 —— 两边不一致。
+    this.#remoteServices.set(name, { providerId: pluginId, methods, token })
     let disposed = false
     return {
       dispose: (): void => {
@@ -273,7 +291,11 @@ export class IsolatedPluginLoader {
    * 同进程插件提供的服务在这里**明确拒绝** —— 活对象过不了进程边界，
    * 而"给个会抛错的假代理"只会把问题推到运行时。
    */
-  #useRemote(consumerId: string, name: string, effects: EffectScopeApi): readonly string[] {
+  #useRemote(
+    consumerId: string,
+    name: string,
+    effects: EffectScopeApi,
+  ): { readonly methods: readonly string[]; readonly token: number | undefined } {
     const info = this.#options.registry.providerInfo(name)
     if (info === undefined) throw new ServiceUnavailableError(name)
     if (!info.remote) {
@@ -290,12 +312,28 @@ export class IsolatedPluginLoader {
 
     const edge = this.#options.registry.depend(consumerId, name, 'hard', range)
     effects.add(() => edge.dispose(), `depend:async:${name}`)
-    return this.#remoteServices.get(name)?.methods ?? []
+    // 把**当前代际**发给消费者：它调用时必须带回来，换人后过期代理会被拒绝。
+    const current = this.#remoteServices.get(name)
+    return { methods: current?.methods ?? [], token: current?.token }
   }
 
-  async #invokeRemote(name: string, method: string, args: readonly unknown[]): Promise<unknown> {
+  async #invokeRemote(
+    name: string,
+    method: string,
+    args: readonly unknown[],
+    token?: number | undefined,
+  ): Promise<unknown> {
     const entry = this.#remoteServices.get(name)
     if (entry === undefined) throw new Error(`远程服务 "${name}" 已不可用（提供者可能已卸载）`)
+    // 代际校验：调用方锚定的 token 必须还是当前提供者的（ADR-0019）。
+    // 没有这一条，last-wins 换人后旧代理会**静默**把调用路由到新提供者 ——
+    // 调用能成功、结果却来自另一个插件，这是最难查的一类问题。
+    if (token !== undefined && entry.token !== token) {
+      throw new Error(
+        `远程服务 "${name}" 的提供者已被替换（last-wins），这个代理已过期：` +
+          '请重新调用 ctx.async.useService(name) 取用当前提供者（ADR-0019）。',
+      )
+    }
     const session = this.#sessions.get(entry.providerId)
     if (session === undefined) {
       throw new Error(`远程服务 "${name}" 的提供者插件 "${entry.providerId}" 当前不在运行中`)
@@ -582,6 +620,9 @@ class IsolatedSession {
   /** 反向调用：宿主执行命令时，请求子进程里的 handler 求值。 */
   async invokeCommand(command: string, args: readonly unknown[]): Promise<unknown> {
     if (!this.alive) throw new Error(`插件 ${this.#pluginId} 的子进程已退出，无法执行 ${command}`)
+    // 命令参数与服务参数走同一条 IPC、只是方向不同：同样在**调用点**校验，
+    // 错误信息带"哪个命令、第几个参数、哪条路径"（否则只会在传输层炸，或类实例静默失真）。
+    assertCloneableCommandArgs(command, args)
     const requestId = ++this.#requestSeq
     const pending = deferred<unknown>()
     this.#invokes.set(requestId, pending)
@@ -870,15 +911,18 @@ class IsolatedSession {
           if (effects === undefined) {
             throw new Error('宿主上下文尚未就绪，无法为 ctx.async.useService 登记依赖边')
           }
-          const methods = this.#options.services.use(this.#pluginId, name, effects)
-          this.#reply(call.id, { methods })
+          const { methods, token } = this.#options.services.use(this.#pluginId, name, effects)
+          this.#reply(call.id, { methods, token })
           break
         }
         case 'services.invoke': {
           const name = String(call.args[0] ?? '')
           const method = String(call.args[1] ?? '')
           const args = Array.isArray(call.args[2]) ? (call.args[2] as unknown[]) : []
-          this.#reply(call.id, await this.#options.services.invoke(name, method, args))
+          // 第 4 个参数是消费者取用时拿到的代际 token（见 services.use 的应答）。
+          const rawToken = call.args[3]
+          const token = typeof rawToken === 'number' ? rawToken : undefined
+          this.#reply(call.id, await this.#options.services.invoke(name, method, args, token))
           break
         }
         case 'log': {

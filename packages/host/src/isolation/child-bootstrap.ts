@@ -4,6 +4,7 @@ import { resolvePluginExport, type AsyncService, type AsyncTextDocument, type Co
 import {
   PROTOCOL_VERSION,
   assertCloneableArgs,
+  assertCloneableCommandArgs,
   describeCloneProblem,
   errorToWire,
   unsupportedReason,
@@ -83,7 +84,11 @@ function listMethods(service: unknown): string[] {
  * 于是 `clock.nwo()` 这种打字错误会变成一个"调用了一个不存在的方法"的跨进程往返，
  * 而不是立刻报错。
  */
-function createRemoteServiceProxy<T>(service: string, methods: readonly string[]): AsyncService<T> {
+function createRemoteServiceProxy<T>(
+  service: string,
+  methods: readonly string[],
+  token: number | undefined,
+): AsyncService<T> {
   const allowed = new Set(methods)
   return new Proxy(
     {},
@@ -103,7 +108,9 @@ function createRemoteServiceProxy<T>(service: string, methods: readonly string[]
         return async (...args: unknown[]): Promise<unknown> => {
           // 前置校验：把"IPC 层才炸、且不告诉你哪个参数"变成调用点就能读懂的错误（ADR-0019）。
           assertCloneableArgs(service, property, args)
-          return await callHost('services.invoke', [service, property, args])
+          // 带上取用时拿到的**代际 token**：提供者被 last-wins 替换后，宿主会拒绝过期代理，
+          // 而不是把调用静默路由到新提供者。
+          return await callHost('services.invoke', [service, property, args, token])
         }
       },
     },
@@ -507,8 +514,12 @@ function buildVscodeProxy(permissions: IsolatedPermissions): PluginVscodeApi {
           void callHost('commands.unregisterCommand', [command]).catch(() => undefined)
         })
       },
-      executeCommand: ((command: string, ...args: unknown[]) =>
-        callHost('commands.executeCommand', [command, args])) as unknown as PluginVscodeApi['commands']['executeCommand'],
+      executeCommand: ((command: string, ...args: unknown[]) => {
+        // 参数同样要过 IPC（child → host，方向与命令 invoke 相反）：在调用点校验，
+        // 错误形态与"注册命令的返回值"一致。
+        assertCloneableCommandArgs(command, args)
+        return callHost('commands.executeCommand', [command, args])
+      }) as unknown as PluginVscodeApi['commands']['executeCommand'],
     },
     window: {
       showInformationMessage: ((message: string) =>
@@ -689,9 +700,12 @@ function buildContext(activation: ActivationState, stack: EffectStack): PluginCo
       },
       useService: async <T,>(name: string): Promise<AsyncService<T>> => {
         // 先让宿主在**它的**注册表里登记依赖边（这样提供者离开时本插件会被 paused），
-        // 并取回方法表 —— 没有方法表，代理无法区分方法与数据字段。
-        const info = (await callHost('services.use', [name])) as { methods: readonly string[] }
-        return createRemoteServiceProxy<T>(name, info.methods)
+        // 并取回方法表 + 代际 token —— 没有方法表，代理无法区分方法与数据字段。
+        const info = (await callHost('services.use', [name])) as {
+          methods: readonly string[]
+          token: number | undefined
+        }
+        return createRemoteServiceProxy<T>(name, info.methods, info.token)
       },
     },
 
@@ -875,7 +889,26 @@ function invokeCommand(requestId: number, command: string, args: readonly unknow
   void Promise.resolve()
     .then(() => handler(...args))
     .then(
-      (value) => send({ kind: 'result', requestId, ok: true, value: value === undefined ? undefined : value }),
+      (value) => {
+        // 返回值也要前置校验：否则宿主拿到的错误来自 IPC 层（没说是哪个命令），
+        // 或者更糟 —— 类实例悄悄丢了原型与方法（ADR-0019 的同一口径）。
+        const problem = describeCloneProblem(`命令 "${command}" 的返回值`, value)
+        if (problem !== undefined) {
+          send({ kind: 'result', requestId, ok: false, error: problem })
+          return
+        }
+        try {
+          send({ kind: 'result', requestId, ok: true, value: value === undefined ? undefined : value })
+        } catch (error) {
+          // 兜底：Proxy 等 precheck 认不出的值。发送失败也必须给出应答，否则宿主会永远等这个 requestId。
+          send({
+            kind: 'result',
+            requestId,
+            ok: false,
+            error: `命令 "${command}" 的返回值无法通过 IPC 序列化：${errorToWire(error)}`,
+          })
+        }
+      },
       (error: unknown) => send({ kind: 'result', requestId, ok: false, error: errorToWire(error) }),
     )
 }

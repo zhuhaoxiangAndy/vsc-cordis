@@ -1459,6 +1459,126 @@ test('ADR-0018：活动编辑器的同步入口在隔离模式下抛错并指向
   }
 })
 
+// ————————————————————————————————— ADR-0019 补齐：命令方向 + 代际锚定
+
+test('ADR-0019：命令参数不可 structured clone 时，错误出现在调用点并给出路径', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'cmd-clone-args',
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('clone.cmd', (arg) => typeof arg),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+
+    await assert.rejects(
+      hostApi.executeCommand('cmd-clone-args', 'clone.cmd', [{ onTick: () => 1 }]),
+      (error: unknown) => {
+        const text = String(error)
+        assert.match(text, /命令 "clone\.cmd" 的第 0 个参数/)
+        assert.match(text, /\.onTick/)
+        assert.match(text, /是函数/)
+        return true
+      },
+    )
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：命令返回值不可 structured clone 时，错误指出命令与返回值路径', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture(
+    'cmd-clone-result',
+    `module.exports = {
+       activate(ctx) {
+         ctx.effect(
+           () => ctx.vscode.commands.registerCommand('clone.badret', () => ({ onTick: () => 1 })),
+           (d) => d.dispose(),
+           'cmd',
+         )
+       },
+     }\n`,
+    { permissions: ['vscode:commands.register'] },
+  )
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+
+    await assert.rejects(
+      hostApi.executeCommand('cmd-clone-result', 'clone.badret', []),
+      (error: unknown) => {
+        const text = String(error)
+        assert.match(text, /命令 "clone\.badret" 的返回值/)
+        assert.match(text, /\.onTick/)
+        assert.match(text, /是函数/)
+        return true
+      },
+    )
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0019：last-wins 换人后，旧代理必须响亮失败而不是静默调用新提供者', async () => {
+  const hostApi = new FakeHostApi()
+  const providerSource = (value: string, conflict?: boolean): string =>
+    `module.exports = {
+       activate(ctx) {
+         ctx.provide('greeting', { hello: () => '${value}' }, { version: '1.0.0'${
+           conflict === true ? ", conflict: 'last-wins'" : ''
+         } })
+       },
+     }\n`
+  const first = await makeFixture('svc-anchor-a', providerSource('from-a'))
+  const second = await makeFixture('svc-anchor-b', providerSource('from-b', true))
+
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(first)
+    await host.settle()
+
+    // 旧代理：在 A 这一代取用（宿主侧代理，锚定了代际 token）
+    const stale = host.registry.resolveForAsync<{ hello(): Promise<string> }>('greeting')
+    assert.equal(await stale.hello(), 'from-a')
+
+    await host.load(second)
+    await host.settle()
+
+    // 新取用拿到 B
+    assert.equal(
+      await host.registry.resolveForAsync<{ hello(): Promise<string> }>('greeting').hello(),
+      'from-b',
+    )
+
+    // 旧代理必须明确失败：它锚定的是 A 那一代，不能悄悄把调用路由到 B
+    await assert.rejects(stale.hello(), (error: unknown) => {
+      const text = String(error)
+      assert.match(text, /已被替换（last-wins）/)
+      assert.match(text, /ctx\.async\.useService/)
+      return true
+    })
+  } finally {
+    await host.unloadAll().catch(() => undefined)
+    await host.settle()
+  }
+})
+
 test('M4c：未声明 configuration 的隔离插件读配置只拿默认值（并说明要声明）', async () => {
   const hostApi = new FakeHostApi()
   hostApi.config.set('cfg-lab.greeting', 'should-not-be-visible')
