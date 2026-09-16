@@ -398,6 +398,13 @@ export class Runtime {
       `完整性校验：${this.#publicKeyPem === undefined ? '⚠ 未配置验签公钥（带签名的插件会被拒绝）' : '已配置验签公钥'}` +
         ' · globalStorage 插件必须签名（docs/signing.md）',
     )
+    // 与"活跃隔离子进程数"同一思路：把"宿主是不是卡住了"变成用户能自己看的数字。
+    lines.push(
+      `任务队列：深度 ${this.host.queueDepth}` +
+        (this.host.queueDepth > 0
+          ? '（有生命周期任务在排队/执行；长时间不归零说明某个任务卡住，见 ADR-0015）'
+          : '（空闲）'),
+    )
     const hotReload = vscode.workspace.getConfiguration('vscordis').get<boolean>('hotReload', true)
     const lastReload =
       this.#lastReloadAt === undefined

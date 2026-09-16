@@ -20,6 +20,9 @@
 - **CLI 的 engines 提前检查**：`tree` / `list` 把 `engines.vscordis` 与仓库内宿主版本比对，
   不匹配给 warning（强制点仍在加载期）。见 ADR-0017。
 - **`--expose-gc` 严格浸泡**（默认 skip）与内存取证方法：1000 轮后堆增长回到噪声范围。见 ADR-0015。
+- **可诊断性**：`PluginHost.queueDepth`（串行队列"排队中 + 执行中"的任务数）暴露到
+  `vscordis: 显示运行时状态` —— 长时间 >0 就说明某个生命周期任务卡住，比"宿主没反应"精确得多。
+- **快速验收单** `docs/acceptance-quick.md`：≈10 分钟走完五条主线，含 `permissionModel` 逃生开关。
 - 内核新增导出：`normalizeVersion`（宿主与 CLI 共用归一化规则）、`RemoteServiceError`。
 
 ### 修复
@@ -38,10 +41,12 @@
 
 - 170 → **215 项**（214 通过 + 1 个 `--expose-gc` 严格用例按设计 skip），8 个构建目标、4 个插件产物冒烟。
 - 两条关键回归做了**反向验证**（临时去掉修复必须失败）：子进程崩溃的在途调用、last-wins 后的旧代理。
-- 新增规模/内存证据：`soak.spec.ts` 的严格模式明确排除了**夹具自身记账**（状态转换日志数组）对堆测量的污染。
+- 新增规模/内存证据：`soak.spec.ts` 的严格模式明确排除了**夹具自身记账**（状态转换日志数组）对堆测量的污染；
+  另加 300 插件依赖链的加载/卸载规模测试（实测约 30ms，结构归零 + 10s 灾难性回归上界）。
 
 ### 文档
 
 - ADR-0009 / 0015 / 0017 / 0018 / 0019 更新「未覆盖」为现状；`docs/plugin-authoring.md`、
   `docs/acceptance-m4b.md` 同步新能力与手动验收步骤。
 - `docs/design/overview.md` 修正「两种执行模式」表中一行过时描述（"服务跨进程 ❌"），补贡献者地图。
+- 新增 `docs/acceptance-quick.md`（≈10 分钟验收主线）并从 README「快速开始」链入。

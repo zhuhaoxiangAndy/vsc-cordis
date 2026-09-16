@@ -112,6 +112,8 @@ export class PluginHost {
   readonly #onTransition: ((event: TransitionEvent) => void) | undefined
   readonly #subscriptions: { dispose(): void }[] = []
   #queue: Promise<void> = Promise.resolve()
+  /** 「排队中 + 执行中」的任务数（队列深度诊断，见 `queueDepth`）。 */
+  #queueDepth = 0
   #disposed = false
 
   constructor(options: PluginHostOptions) {
@@ -149,6 +151,17 @@ export class PluginHost {
    */
   async settle(): Promise<void> {
     await this.#enqueue(async () => {})
+  }
+
+  /**
+   * 串行队列里「排队中 + 执行中」的任务数。
+   *
+   * 诊断用途：**持续 > 0** 说明某个生命周期任务（load/unload/activate/级联处理）卡住了 ——
+   * 这比"宿主没反应"精确得多，也和 `vscordis: 显示运行时状态` 里的"活跃隔离子进程数"同一思路
+   * （ADR-0015 决策 4：诊断能力不该只活在测试里）。正常空闲时恒为 0。
+   */
+  get queueDepth(): number {
+    return this.#queueDepth
   }
 
   get port(): HostPort {
@@ -540,7 +553,16 @@ export class PluginHost {
   // ————————————————————————————————— 内部：队列与视图
 
   #enqueue<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.#queue.then(() => task())
+    this.#queueDepth += 1
+    const run = this.#queue.then(async () => {
+      try {
+        return await task()
+      } finally {
+        // 任务**跑完**（无论成功/失败）就减一：深度语义是"还没结束的任务数"，
+        // 不是"还没开始的任务数"。
+        this.#queueDepth -= 1
+      }
+    })
     this.#queue = run.then(
       () => undefined,
       () => undefined,

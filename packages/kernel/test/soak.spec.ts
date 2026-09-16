@@ -287,3 +287,66 @@ test(
     await host.dispose()
   },
 )
+
+/**
+ * 规模证据：**长依赖链**是服务注册表里最贵的形状 —— 卸载 A1 要计算 A1 的传递闭包
+ * （`affectedBy` 做 BFS），撤销会沿链级联。300 个插件足以把"每个插件 O(n)"级
+ * 的退化放大成肉眼可见的耗时，同时仍是秒级测试。
+ *
+ * 断言分两层：**结构**（加载后恰好 N 个槽位与命令，卸载后全部归零）与**宽松耗时上界**
+ * （实测约几百毫秒；10s 上界只用来抓 O(n²)+ 的灾难性回归，不做性能承诺）。
+ */
+test('规模：300 插件依赖链加载 → 卸载，结构归零且耗时远低于宽松上界', async () => {
+  const COUNT = 300
+  const port = new FakeHostPort()
+  const entries: ReturnType<typeof makeEntry>[] = []
+
+  for (let index = 0; index < COUNT; index += 1) {
+    const id = `chain-${index}`
+    const dependency = index === 0 ? undefined : `svc-${index - 1}`
+    port.define(id, (): CordisPlugin => ({
+      activate(ctx) {
+        if (dependency !== undefined) ctx.use(dependency)
+        ctx.provide(`svc-${index}`, { n: index }, { version: '1.0.0' })
+        ctx.effect(
+          () => ctx.vscode.commands.registerCommand(`${id}.run`, () => index),
+          (disposable) => disposable.dispose(),
+          `cmd:${id}`,
+        )
+      },
+    }))
+    entries.push(
+      makeEntry(id, {
+        permissions: ['vscode:commands.register'],
+        provides: [`svc-${index}`],
+        ...(dependency === undefined ? {} : { dependencies: { [dependency]: '^1.0.0' } }),
+      }),
+    )
+  }
+
+  const host = new PluginHost({ port, disposeTimeoutMs: 200, activationTimeoutMs: 5_000 })
+  const started = Date.now()
+
+  for (const entry of entries) await host.load(entry)
+  await host.settle()
+  for (const entry of entries) {
+    assert.equal(host.view(entry.manifest.id)?.state, 'active', `${entry.manifest.id} 应当是 active`)
+  }
+  // 中途结构断言：既不少（漏注册）也不多（重复登记）
+  assert.equal(host.registry.providedServices().length, COUNT)
+  assert.equal(port.commands.size, COUNT)
+
+  await host.unloadAll()
+  await host.settle()
+  const elapsed = Date.now() - started
+
+  assert.deepEqual(host.list(), [])
+  assert.equal(host.registry.size, 0, '卸载后注册表不得留下任何槽位')
+  assert.equal(port.commands.size, 0)
+  assert.equal(port.moduleReleases.length, COUNT, '每次加载都应当对应一次模块释放')
+
+  console.log(`  [规模] ${COUNT} 插件依赖链：加载 + 卸载共 ${elapsed}ms`)
+  assert.ok(elapsed < 10_000, `${COUNT} 插件链加载+卸载耗时 ${elapsed}ms，超过宽松上界 10s`)
+
+  await host.dispose()
+})

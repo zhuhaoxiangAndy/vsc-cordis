@@ -35,7 +35,7 @@
 
 ```bash
 pnpm install                       # 需要 Node >= 22.18（原生类型剥离）
-pnpm run verify                    # 类型检查 + 170 项测试 + 构建 + 产物冒烟
+pnpm run verify                    # 类型检查 + 215 项测试（214 通过 + 1 个严格用例按设计 skip）+ 构建 + 产物冒烟
 ```
 
 开发时开两个进程：
@@ -49,6 +49,10 @@ pnpm run watch                     # 终端 A：esbuild 监听插件源码 → �
 （时延预算分解与实测方法见 `docs/acceptance-m3.md`）。
 
 `Ctrl+Shift+P` 输入 `VSCordis` 可见 6 个入口命令。
+
+**手动验收**：先走 `docs/acceptance-quick.md`（≈10 分钟主线，串起命令生命周期、依赖级联、
+隔离子进程、显式异步面与热重载，含 `vscordis.isolation.permissionModel` 未实测项的逃生开关）。
+需要细节时再看 `docs/acceptance-m1-m2.md` / `acceptance-m3.md` / `acceptance-m4b.md`。
 
 ## 打包（本地 VSIX）
 

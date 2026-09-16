@@ -86,3 +86,41 @@ test('activate 抛错时同样发出 AbortSignal（回滚要连插件侧的异�
   assert.equal(host.view('explodes')?.state, 'failed')
   await host.dispose()
 })
+
+test('queueDepth：慢 activate 在途中 >=1、再排队 >=2、settle 后归零（诊断"宿主卡住"）', async () => {
+  const port = new FakeHostPort()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let started = false
+
+  port.define('gated', (): CordisPlugin => ({
+    activate() {
+      started = true
+      return gate
+    },
+  }))
+  port.define('next', (): CordisPlugin => ({ activate() {} }))
+
+  const host = new PluginHost({ port, activationTimeoutMs: 2_000, disposeTimeoutMs: 100 })
+  assert.equal(host.queueDepth, 0, '空闲时必须是 0')
+
+  const first = host.load(makeEntry('gated'))
+  // 让队列真正开始执行第一个任务（入队是同步的，任务本身在微任务里才开始）
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(started, true, '第一个任务应当已经开始执行')
+  assert.ok(host.queueDepth >= 1, `执行中深度应 >=1，实际 ${host.queueDepth}`)
+
+  const second = host.load(makeEntry('next'))
+  assert.ok(host.queueDepth >= 2, `再排一个任务后深度应 >=2，实际 ${host.queueDepth}`)
+
+  release()
+  await first
+  await second
+  await host.settle()
+  assert.equal(host.queueDepth, 0, '队列排空后必须归零 —— 否则状态面板会一直报"卡住"')
+  assert.equal(host.view('gated')?.state, 'active')
+  assert.equal(host.view('next')?.state, 'active')
+  await host.dispose()
+})
