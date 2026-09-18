@@ -23,7 +23,14 @@ export interface ExecArgvPlan {
 export interface ExecArgvOptions {
   /** 子进程引导脚本的绝对路径。Node 权限模型下它也必须被显式允许读取。 */
   readonly workerPath: string
-  /** 插件根目录：可读；只有拿到 `fs:write` 才可写。 */
+  /** 插件入口（单文件 bundle）绝对路径；必须显式授权读取。 */
+  readonly mainPath: string
+  /**
+   * pluginRoot 顶层允许读取的路径（`pluginReadPaths(root)`，已排除 `node_modules`）。
+   * 不再直接授权整个 pluginRoot：pnpm workspace 的 node_modules 外部链接会带出 root 读取权（ADR-0020）。
+   */
+  readonly readPaths: readonly string[]
+  /** 插件根目录：只有拿到 `fs:write` 才可写（写仍限自己的目录）。 */
   readonly pluginRoot: string
   readonly permissions: ReadonlySet<Permission>
   /**
@@ -50,11 +57,18 @@ export function buildExecArgv(options: ExecArgvOptions): ExecArgvPlan {
     '--permission',
     // Node 权限模型要求显式允许读取模块本身，否则连引导脚本都加载不了。
     `--allow-fs-read=${options.workerPath}`,
-    `--allow-fs-read=${options.pluginRoot}`,
+    `--allow-fs-read=${options.mainPath}`,
   ]
 
+  // 顶层条目（排除 node_modules）逐个授权：插件仍能读自己的 bundle/资源，
+  // 但 node_modules 里的 pnpm 符号链接不会把 root 读权限带出去。
+  for (const allowed of options.readPaths) {
+    const flag = `--allow-fs-read=${allowed}`
+    if (!execArgv.includes(flag)) execArgv.push(flag)
+  }
+
   if (permissions.has('fs:write')) {
-    // 只放开插件自己的目录，不放开工作区 —— 需要写工作区的插件请显式申请（M4c 会加 fs:write:workspace）。
+    // 只放开插件自己的目录，不放开工作区 —— 需要写工作区的场景请显式申请。
     execArgv.push(`--allow-fs-write=${options.pluginRoot}`)
   }
 

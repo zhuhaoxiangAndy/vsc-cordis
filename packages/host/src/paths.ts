@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync } from 'node:fs'
+import { readdirSync, realpathSync } from 'node:fs'
 import { readdir, realpath } from 'node:fs/promises'
 import * as path from 'node:path'
 
@@ -43,50 +43,37 @@ export function realRootOrResolved(root: string): string {
   }
 }
 
-function readPackageName(directory: string): string | undefined {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path.join(directory, 'package.json'), 'utf8'))
-    if (parsed === null || typeof parsed !== 'object') return undefined
-    const name = (parsed as { name?: unknown }).name
-    return typeof name === 'string' && name.length > 0 ? name : undefined
-  } catch {
-    return undefined
-  }
+function isNodeModulesName(name: string): boolean {
+  return process.platform === 'win32' ? name.toLowerCase() === 'node_modules' : name === 'node_modules'
 }
 
 /**
- * `node_modules` 下的外部链接只允许普通依赖链接：
- * `node_modules/<pkg>` / `node_modules/@scope/<pkg>`，且目标目录 `package.json#name` 必须等于链接名
- * （`@vscordis/sdk -> packages/sdk` 因此放行）。
+ * 权限模型允许读取的路径列表：`pluginRoot` 的**顶层条目**，排除 `node_modules`。
  *
- * `node_modules/.bin` 的外部链接**不放行**：它是开发期产物，而插件 `main` 必须是单文件 bundle，
- * 运行期不需要它；"向上找 package.json" 的判定可能被家目录 package.json 放水，所以 fail-closed。
- * 指向 `.ssh` / 系统目录的任意链接仍然拒绝。
+ * 为什么不直接 `--allow-fs-read=<pluginRoot>`：pnpm workspace 会在插件根下放
+ * `node_modules/@vscordis/sdk -> packages/sdk` 这类外部链接；只要 root 被整体授权，
+ * 任何名字匹配/伪装都无法阻止链接把读取带到 root 外（审计已端到端复现）。
+ * 把 `node_modules` 从扫描和授权里同时移除，pnpm 链接不再需要“白名单”，
+ * 藏在外面的恶意链接也因为没有授权而读不到。
  */
-function isAllowedDependencyLink(realRoot: string, link: string, target: string): boolean {
-  const relative = path.relative(realRoot, link)
-  const segments = relative.split(path.sep)
-
-  let nodeModulesIndex = -1
-  for (let index = segments.length - 1; index >= 0; index -= 1) {
-    const segment = segments[index]
-    if (segment === undefined) continue
-    const isNodeModules =
-      process.platform === 'win32' ? segment.toLowerCase() === 'node_modules' : segment === 'node_modules'
-    if (isNodeModules) {
-      nodeModulesIndex = index
-      break
-    }
+export function pluginReadPaths(root: string): readonly string[] {
+  const realRoot = realRootOrResolved(root)
+  let entries
+  try {
+    entries = readdirSync(realRoot, { withFileTypes: true })
+  } catch {
+    return []
   }
-  if (nodeModulesIndex < 0) return false
 
-  const tail = segments.slice(nodeModulesIndex + 1)
-  const first = tail[0]
-  if (first === undefined || first === '.bin') return false
-
-  const packageName = first.startsWith('@') ? `${first}/${tail[1] ?? ''}` : first
-  if (packageName.endsWith('/') || packageName.includes('..')) return false
-  return readPackageName(target) === packageName
+  const paths: string[] = []
+  for (const entry of entries) {
+    if (isNodeModulesName(entry.name)) continue
+    const full = path.join(realRoot, entry.name)
+    // 外部链接已由 assertNoEscapingReparsePoints 拒绝（node_modules 外的部分）；
+    // 这里保留链接路径本身，让 root 内链接仍可被读取（真实目标也在 root 内）。
+    paths.push(full)
+  }
+  return paths.sort()
 }
 
 /**
@@ -127,6 +114,20 @@ export async function assertNoEscapingReparsePoints(root: string): Promise<void>
 
     for (const entry of entries) {
       const full = path.join(current, entry.name)
+      if (isNodeModulesName(entry.name)) {
+        // 顶层 node_modules 是 pnpm 的正常布局：跳过扫描，同时它也不在
+        // pluginReadPaths 里，所以里面的链接读不到。
+        // 嵌套 node_modules 则是刻意隐藏链接的温床：既然 main 必须是单文件 bundle，
+        // 正常插件不需要它，直接 fail-closed（否则外层目录被整体授权会带出链接读取权）。
+        if (current !== realRoot) {
+          throw new PluginReparsePointError(
+            `插件目录内存在嵌套 node_modules：${full}。` +
+              'main 必须是单文件 bundle；嵌套依赖目录会绕过链接扫描，拒绝加载（ADR-0020）。',
+          )
+        }
+        continue
+      }
+
       // Dirent.isSymbolicLink() 在 Windows 上对 junction 同样返回 true（已实测）。
       if (entry.isSymbolicLink()) {
         const target = await realpath(full).catch(() => {
@@ -139,9 +140,6 @@ export async function assertNoEscapingReparsePoints(root: string): Promise<void>
         const insideRoot =
           !(relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
         if (!insideRoot) {
-          // pnpm workspace 会把 `node_modules/@scope/pkg` 链接到仓库内另一个包（解析到 root 外）；
-          // 这类依赖链接按“链接名 == 目标 package.json#name”白名单放行，其余逃逸链接仍拒绝。
-          if (isAllowedDependencyLink(realRoot, full, target)) continue
           throw new PluginReparsePointError(
             `插件目录内存在指向目录外的链接：${full} → ${target}。` +
               'Node 的 --allow-fs-read 会跟随链接，必须在 fork 前拒绝（ADR-0020）。',

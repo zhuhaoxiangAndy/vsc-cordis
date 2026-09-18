@@ -5,7 +5,8 @@
 ## 背景（一手证据）
 
 ADR-0013 用 `child_process.fork` + Node `--permission` + `--allow-fs-read=<pluginRoot>` 给 `untrusted`
-插件做“真边界”。但 Node 权限模型的路径白名单只对**路径字符串**生效，不解析 root 内的符号链接/junction。
+插件做“真边界”（决策 8 已把授权收窄为顶层条目并排除 `node_modules`）。但 Node 权限模型的路径白名单
+只对**路径字符串**生效，不解析 root 内的符号链接/junction。
 
 本机实测（Windows 11，VSCode 1.118.1 / Electron 39.8.8 / Node 22.22.1）：
 
@@ -40,17 +41,18 @@ ADR-0013 用 `child_process.fork` + Node `--permission` + `--allow-fs-read=<plug
    而能在本机把外部文件 hardlink 进插件根的人本来就能读该文件。作为已知缺口记录。
 7. **可操作错误信息**：报出链接路径、解析后的目标和原因（“`--allow-fs-read` 会跟随链接”），
    而不是一句“加载失败”。
-8. **包管理器依赖链接白名单**（交付后 F5 回归修复）：`node_modules` 下的外部链接不能一刀切拒绝，
-   否则 `pnpm install` 产生的 workspace 链接会让所有插件加载失败。放行规则只有一条：
-   `node_modules/<pkg>` / `node_modules/@scope/<pkg>`，目标目录的 `package.json#name` 必须等于
-   链接名（例如 `@vscordis/sdk -> packages/sdk`）。`node_modules/.bin` 的外部链接**不放行**：
-   它是开发期产物，而插件 `main` 必须是单文件 bundle，运行期不需要它；“向上找 package.json”
-   的宽松判定可能被家目录 package.json 放水，所以 fail-closed。指向 `.ssh` / 系统目录等没有
-   同名包的目标仍然拒绝。白名单检查只看链接名与目标 package.json，不递归进外部目标目录。
+8. **顶层 `node_modules` 跳过 + 不再整体授权 pluginRoot**（交付后审计修复）：
+   - **扫描**：顶层 `node_modules` 跳过（pnpm workspace 的正常布局，里面的依赖链接不再逐个判定）；
+     **嵌套 `node_modules` 一律 fail-closed** —— 插件 `main` 必须是单文件 bundle，正常插件不需要
+     嵌套依赖目录，而外层目录一旦被整体授权，藏在里面的链接会把读取带出 root。
+   - **授权**：`--allow-fs-read` 不再授予整个 `pluginRoot`，而是 `workerPath`、`mainPath`，
+     以及 `pluginRoot` 顶层条目（排除 `node_modules`）。`node_modules` 下的任何链接即使存在也
+     读不到，因此不需要“链接名 == 目标 package.json#name”这种可被攻击者自选名字绕过的白名单。
+   - 顶层内部链接仍放行（真实目标在 root 内），顶层外部链接仍在 fork 前拒绝。
 
 ## 后果
 
-- 除 `node_modules` 依赖白名单（决策 8）外，带外部链接的插件包会被拒绝加载；monorepo 开发目录里
+- 除顶层 `node_modules`（跳过扫描且不授权）外，带外部链接的插件包会被拒绝加载；monorepo 开发目录里
   指向 root 内的链接不受影响。
 - 每次加载 `untrusted` 插件增加一次插件目录递归扫描。插件 `main` 必须是单文件 bundle，
   插件根通常很小；这是可接受的加载期成本。
@@ -62,8 +64,10 @@ ADR-0013 用 `child_process.fork` + Node `--permission` + `--allow-fs-read=<plug
 
 - 外部 junction 必须被 fork 前拒绝，并断言 `sessionsStarted === 0`；
 - 指向 root 内部的 junction 正常加载并读到文件（防止“见链接就拒”的一刀切回归）；
-- `node_modules/@vscordis/sdk -> 同名 package` 的 workspace 链接正常加载；
-- `node_modules/evil -> 无同名 package.json 的外部目录` 仍被 fork 前拒绝。
+- 顶层 `node_modules/@vscordis/sdk -> 外部包` 的 pnpm workspace 布局正常加载；
+- 顶层 `node_modules/evil -> 外部目录` 虽然被扫描跳过，但插件读取链接会拿到 `ERR_ACCESS_DENIED`；
+- `node_modules/.bin` 外部链接同样不可读；
+- 嵌套 `node_modules`（如 `assets/node_modules/leak`）直接在 fork 前拒绝。
 
 两条都做了反向验证：临时移除扫描逻辑，第一条必须失败（说明它测的是修复本身，不是恒真断言）。
 

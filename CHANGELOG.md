@@ -80,9 +80,11 @@
   现在注册遇到其它 owner 抛 `PermissionDeniedError`；注销接口携带 pluginId 并做归属校验，
   两种模式同规则。见 ADR-0023。
 - **ADR-0020 reparse 扫描误伤 pnpm workspace 依赖链接**：`pnpm install` 后每个插件根都有
-  `node_modules/@vscordis/sdk -> packages/sdk`，一刀切拒绝会让所有 untrusted 插件加载失败。
-  现在 `node_modules/<pkg>` 目标 `package.json#name` 同名时放行；`node_modules/.bin` 外部链接
-  直接 fail-closed（开发期产物，main 是单文件 bundle）；其余外部链接仍 fail-closed。见 ADR-0020 决策 8。
+  `node_modules/@vscordis/sdk -> packages/sdk`，一刀切拒绝会让所有 untrusted 插件加载失败；
+  但“链接名 == 目标 package.json#name”白名单又会被攻击者自选链接名绕过。最终方案：
+  顶层 `node_modules` 跳过扫描且**不加入读取授权**；`--allow-fs-read` 改为 workerPath、mainPath
+  与 pluginRoot 顶层条目（排除 node_modules）；嵌套 `node_modules` fail-closed。
+  这样 pnpm 链接不会误伤，藏在 node_modules 里的恶意链接也读不到。见 ADR-0020 决策 8。
 - **`isInside` / reparse 扫描把 `<root>/..evil/...` 误判为 root 外**：
   `relative.startsWith('..')` 对 `..evil` 为真；现在只拒绝 `..` 段本身（`relative === '..' ||
   relative.startsWith('..'+sep)）。

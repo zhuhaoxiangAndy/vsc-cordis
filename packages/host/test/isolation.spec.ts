@@ -394,13 +394,17 @@ async function makeHost(
 test('buildExecArgv：最小权限只放开引导脚本与插件目录', () => {
   const plan = buildExecArgv({
     workerPath: '/w/isolated-worker.cjs',
+    mainPath: '/p/hello/dist/index.cjs',
+    readPaths: ['/p/hello/dist', '/p/hello/package.json'],
     pluginRoot: '/p/hello',
     permissions: new Set<Permission>(),
   })
   assert.deepEqual(plan.execArgv, [
     '--permission',
     '--allow-fs-read=/w/isolated-worker.cjs',
-    '--allow-fs-read=/p/hello',
+    '--allow-fs-read=/p/hello/dist/index.cjs',
+    '--allow-fs-read=/p/hello/dist',
+    '--allow-fs-read=/p/hello/package.json',
   ])
   assert.deepEqual(plan.warnings, [])
 })
@@ -408,6 +412,8 @@ test('buildExecArgv：最小权限只放开引导脚本与插件目录', () => {
 test('buildExecArgv：fs:write 只放开插件自己的目录，process:spawn 带降级警告', () => {
   const plan = buildExecArgv({
     workerPath: '/w/worker.cjs',
+    mainPath: '/p/hello/dist/index.cjs',
+    readPaths: ['/p/hello/dist'],
     pluginRoot: '/p/hello',
     permissions: new Set<Permission>(['fs:write', 'process:spawn', 'net']),
   })
@@ -421,6 +427,8 @@ test('buildExecArgv：fs:write 只放开插件自己的目录，process:spawn �
 test('buildExecArgv：关闭权限模型时给出明确的降级说明', () => {
   const plan = buildExecArgv({
     workerPath: '/w/worker.cjs',
+    mainPath: '/p/hello/dist/index.cjs',
+    readPaths: ['/p/hello/dist'],
     pluginRoot: '/p/hello',
     permissions: new Set<Permission>(),
     usePermissionModel: false,
@@ -671,9 +679,27 @@ test('ADR-0020：pnpm workspace 依赖链接（目标 package.json 同名）必�
   }
 })
 
-test('ADR-0020：node_modules 下指向无同名 package.json 的外部链接仍拒绝', async () => {
+test('ADR-0020：node_modules 下的外部链接被扫描跳过，但读取被权限模型拒绝', async () => {
   const hostApi = new FakeHostApi()
-  const entry = await makeFixture('workspace-link-evil', `module.exports = { activate() {} }\n`)
+  const entry = await makeFixture(
+    'workspace-link-evil',
+    `module.exports = {
+       activate(ctx) {
+         const fs = require('node:fs')
+         const path = require('node:path')
+         try {
+           fs.readFileSync(path.join(__dirname, '..', 'node_modules', 'evil', 'secret.txt'), 'utf8')
+           throw new Error('node_modules 外部链接不应可读')
+         } catch (error) {
+           if (error && error.code === 'ERR_ACCESS_DENIED') {
+             ctx.log.info('node-modules-link-denied')
+             return
+           }
+           throw error
+         }
+       },
+     }\n`,
+  )
   const externalDir = path.join(scratch, 'workspace-link-evil-secret')
   await mkdir(externalDir, { recursive: true })
   await writeFile(path.join(externalDir, 'secret.txt'), 'SECRET\n', 'utf8')
@@ -686,16 +712,45 @@ test('ADR-0020：node_modules 下指向无同名 package.json 的外部链接仍
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
   }
 
-  const { host, loader } = await makeHost(hostApi)
-  await assert.rejects(host.load(entry), /指向目录外的链接/)
-  assert.equal(loader.sessionsStarted, 0, '仍然必须在 fork 前拒绝，不能起子进程')
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(host.view('workspace-link-evil')?.state, 'active', '扫描跳过 node_modules 不应阻止插件加载')
+    assert.ok(
+      hostApi.logs.some((log) => log.message.includes('node-modules-link-denied')),
+      'node_modules 未被授权读取，链接必须拿到 ERR_ACCESS_DENIED',
+    )
+  } finally {
+    await host.unload('workspace-link-evil').catch(() => undefined)
+    await host.settle()
+  }
 })
 
-test('ADR-0020：node_modules/.bin 外部链接 fail-closed', async () => {
+test('ADR-0020：node_modules/.bin 外部链接同样不可读', async () => {
   const hostApi = new FakeHostApi()
-  const entry = await makeFixture('workspace-bin-link', `module.exports = { activate() {} }\n`)
+  const entry = await makeFixture(
+    'workspace-bin-link',
+    `module.exports = {
+       activate(ctx) {
+         const fs = require('node:fs')
+         const path = require('node:path')
+         try {
+           fs.readFileSync(path.join(__dirname, '..', 'node_modules', '.bin', 'leak', 'secret.txt'), 'utf8')
+           throw new Error('.bin 外部链接不应可读')
+         } catch (error) {
+           if (error && error.code === 'ERR_ACCESS_DENIED') {
+             ctx.log.info('bin-link-denied')
+             return
+           }
+           throw error
+         }
+       },
+     }\n`,
+  )
   const externalDir = path.join(scratch, 'workspace-bin-target')
   await mkdir(externalDir, { recursive: true })
+  await writeFile(path.join(externalDir, 'secret.txt'), 'SECRET\n', 'utf8')
   const binDir = path.join(entry.root, 'node_modules', '.bin')
   await mkdir(binDir, { recursive: true })
   const link = path.join(binDir, 'leak')
@@ -705,9 +760,39 @@ test('ADR-0020：node_modules/.bin 外部链接 fail-closed', async () => {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
   }
 
+  const { host } = await makeHost(hostApi)
+  try {
+    await host.load(entry)
+    await host.settle()
+    assert.equal(host.view('workspace-bin-link')?.state, 'active', '扫描跳过 node_modules 不应阻止插件加载')
+    assert.ok(
+      hostApi.logs.some((log) => log.message.includes('bin-link-denied')),
+      '.bin 未被授权读取，链接必须拿到 ERR_ACCESS_DENIED',
+    )
+  } finally {
+    await host.unload('workspace-bin-link').catch(() => undefined)
+    await host.settle()
+  }
+})
+
+test('ADR-0020：嵌套 node_modules 一律 fail-closed（防止藏链接绕过扫描）', async () => {
+  const hostApi = new FakeHostApi()
+  const entry = await makeFixture('nested-node-modules', `module.exports = { activate() {} }\n`)
+  const externalDir = path.join(scratch, 'nested-node-modules-secret')
+  await mkdir(externalDir, { recursive: true })
+  await writeFile(path.join(externalDir, 'secret.txt'), 'SECRET\n', 'utf8')
+  const nested = path.join(entry.root, 'assets', 'node_modules')
+  await mkdir(nested, { recursive: true })
+  const link = path.join(nested, 'leak')
+  try {
+    await symlink(externalDir, link, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+
   const { host, loader } = await makeHost(hostApi)
-  await assert.rejects(host.load(entry), /指向目录外的链接/)
-  assert.equal(loader.sessionsStarted, 0, '.bin 外部链接同样必须在 fork 前拒绝')
+  await assert.rejects(host.load(entry), /嵌套 node_modules/)
+  assert.equal(loader.sessionsStarted, 0, '嵌套 node_modules 必须在 fork 前拒绝')
 })
 
 test('环境变量：实际 fork 默认不继承宿主敏感变量，inheritEnv=true 才继承（ADR-0021）', async () => {

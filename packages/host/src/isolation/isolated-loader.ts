@@ -3,7 +3,7 @@ import type { CordisPlugin, Disposable, LogLevel, Permission, PluginContext } fr
 import { PermissionDeniedError, ServiceRegistry, ServiceUnavailableError, type LoadedPluginModule, type PluginEntry } from '@vscordis/kernel'
 import type { EffectScopeApi } from '@vscordis/sdk'
 import { PluginIntegrityError, verifyPluginArtifact } from '../integrity.ts'
-import { assertNoEscapingReparsePoints } from '../paths.ts'
+import { assertNoEscapingReparsePoints, pluginReadPaths } from '../paths.ts'
 import { buildIsolatedChildEnv } from './environment.ts'
 import { buildExecArgv, toIsolatedPermissions, type ExecArgvPlan } from './permissions.ts'
 import {
@@ -472,6 +472,8 @@ export class IsolatedPluginLoader {
     const plan = this.#options.execArgvFor?.(entry, permissions) ??
       buildExecArgv({
         workerPath: this.#options.workerPath,
+        mainPath: entry.mainPath,
+        readPaths: pluginReadPaths(entry.root),
         pluginRoot: entry.root,
         permissions,
         ...(this.#options.usePermissionModel === undefined
